@@ -4,3 +4,5 @@ compile_commands.json
 data/
 sessions/
 .DS_Store
+build-bui/
+.cache/
