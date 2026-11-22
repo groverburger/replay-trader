@@ -34,6 +34,7 @@ struct Fill {
     int side, qty;
     double price;
     std::string why;
+    bool protective = false;  // a bracket leg (stop loss / take profit) closed or reduced the position
 };
 
 struct RoundTrip {

@@ -79,6 +79,10 @@ void on_frame(void*, BKWindow* win) {
     if (g_trading) {
         tick(dt);
         chart_animate(dt);
+        if (g.bt.runs() != g.bt_seen && !g.bt.running()) {  // a backtest finished
+            g.bt_result = g.bt.result();
+            g.bt_seen = g.bt.runs();
+        }
     }
     // a download that finished cleanly goes straight on to the trader
     else if (g_dl.finished() && g_dl.runs != g_handled_run) {
@@ -89,6 +93,15 @@ void on_frame(void*, BKWindow* win) {
     if (g_trading && (g.playing || chart_animating())) BK_window_request_frame(win, 1);
 }
 
+// Once a second: pick up edited user scripts (and redraw with them).
+void on_timer(void*, BKWindow* win, int) {
+    if (g_scripts.poll_changes()) {
+        g.broker.log.push_back("scripts reloaded");
+        poke();
+    }
+    BK_window_timer(win, 1000);
+}
+
 void on_wake() { poke(); }
 
 void start_replay() {
@@ -97,7 +110,7 @@ void start_replay() {
         if (((g.m.t[i] % 1440) + 1440) % 1440 == 570) g.opens.push_back(i);
     if (!g_start || !start_at(g_start)) random_day();
     if (g_demo) {  // a quick tour: a few indicators and a bracketed trade
-        for (int t : {EMA, BOLL, PIVOTS, VWAP, RSI, MACD}) g.inds.push_back(make_ind(t, g.next_uid++));
+        for (const char* id : {"ema", "bollinger", "pivots", "vwap", "rsi", "macd"}) g.inds.push_back(make_ind(id, g.next_uid++));
         g.tf_idx = 1;
         advance(70);
         g.bracket = true;
@@ -133,6 +146,69 @@ bool load_market() {
     }
     for (const std::string& n : notes) g.broker.log.push_back(n);
     return true;
+}
+
+// --backtest: run a strategy over a date range and print the statistics (no window, no download).
+int run_backtest_cli(const char* id, const char* from_s, const char* to_s, const std::vector<std::string>& sets,
+                     const char* data_file, const char* csv) {
+    std::string err;
+    if (data_file ? !g.m.load(data_file, err) : !load_market()) {
+        std::fprintf(stderr, "%s\n", data_file ? err.c_str() : g_load_err.c_str());
+        return 1;
+    }
+    const ScriptDef* d = g_scripts.find(true, id);
+    if (!d || !d->error.empty()) {
+        std::fprintf(stderr, "strategy %s: %s\n", id, d ? d->error.c_str() : "not found");
+        for (const ScriptDef* s : g_scripts.list(true)) std::fprintf(stderr, "  available: %s\n", s->id.c_str());
+        return 1;
+    }
+    Params p = default_params(*d);
+    for (const std::string& kv : sets) {
+        size_t eq = kv.find('=');
+        std::string name = kv.substr(0, eq), val = eq == std::string::npos ? "" : kv.substr(eq + 1);
+        bool found = false;
+        for (size_t k = 0; k < d->params.size(); ++k) {
+            const ParamDef& q = d->params[k];
+            if (q.name != name) continue;
+            found = true;
+            if (q.kind == ParamDef::Bool) p[k] = val == "true" || val == "1";
+            else if (q.kind == ParamDef::Choice) {
+                auto it = std::find(q.options.begin(), q.options.end(), val);
+                p[k] = it == q.options.end() ? q.def : static_cast<double>(it - q.options.begin());
+            } else p[k] = std::atof(val.c_str());
+        }
+        if (!found) std::fprintf(stderr, "warning: %s has no param %s\n", id, name.c_str());
+    }
+    int64_t from = g.m.t.front(), to = g.m.t.back() + 1;
+    if (from_s && !parse_minutes(from_s, from)) return std::fprintf(stderr, "bad --bt-from\n"), 1;
+    if (to_s) {
+        if (!parse_minutes(to_s, to)) return std::fprintf(stderr, "bad --bt-to\n"), 1;
+        to += 1440;  // inclusive
+    }
+    auto t0 = std::chrono::steady_clock::now();
+    g.bt.start(*d, p, &g.m, from, to, g.broker);
+    while (g.bt.running()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    g.bt.cancel();
+    BacktestResult r = g.bt.result();
+    double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
+    const BacktestStats& s = r.stats;
+    std::printf("%s  (%s to %s, %d sessions, %.1f s)\n", r.params.c_str(), fmt_time(r.from, "%Y-%m-%d").c_str(),
+                fmt_time(r.to, "%Y-%m-%d").c_str(), s.days, secs);
+    if (!r.error.empty()) std::printf("error: %s\n", r.error.c_str());
+    int losses = s.trades - s.wins;
+    std::printf("net $%.0f  trades %d  win %.1f%%  PF %.2f  avg win $%.0f  avg loss $%.0f  expectancy $%.1f\n", s.net, s.trades,
+                100.0 * s.wins / std::max(1, s.trades), s.gross_loss > 0 ? s.gross_win / s.gross_loss : 0.0,
+                s.wins ? s.gross_win / s.wins : 0.0, losses ? -s.gross_loss / losses : 0.0, s.net / std::max(1, s.trades));
+    std::printf("max DD $%.0f  Sharpe %.2f  days up %.0f%%  best $%.0f  worst $%.0f  losing run %d  avg hold %.0f min  fees $%.0f\n",
+                s.max_dd, s.sharpe, s.pct_days_up, s.largest_win, s.largest_loss, s.max_consec_losses, s.avg_minutes, s.fees);
+    size_t shown = 0;
+    for (const std::string& l : r.log)
+        if (shown++ < 8) std::printf("  log: %s\n", l.c_str());
+    if (r.log.size() > 8) std::printf("  log: ... %zu lines\n", r.log.size());
+    for (const std::string& l : r.log)
+        if (l.find("gap in the data") != std::string::npos) std::printf("  warning: %s\n", l.c_str());
+    if (csv) std::printf(export_trips_csv(csv, r.trips) ? "trades written to %s\n" : "could not write %s\n", csv);
+    return r.error.empty() ? 0 : 1;
 }
 
 // Headless: download synchronously with progress on stderr.
@@ -209,12 +285,19 @@ int main(int argc, char** argv) {
     const char* cli_key = nullptr;
     const char* data_file = nullptr;
     bool offline = false, show_setup = false;
+    const char *bt_id = nullptr, *bt_from = nullptr, *bt_to = nullptr, *bt_csv = nullptr;
+    std::vector<std::string> bt_sets;  // --set name=value (backtest params)
     for (int a = 1; a < argc; ++a) {
         if (!std::strcmp(argv[a], "--screenshot") && a + 1 < argc) shot = argv[++a];
         else if (!std::strcmp(argv[a], "--start") && a + 1 < argc) g_start = argv[++a];
         else if (!std::strcmp(argv[a], "--api-key") && a + 1 < argc) cli_key = argv[++a];
         else if (!std::strcmp(argv[a], "--data") && a + 1 < argc) data_file = argv[++a];
         else if (!std::strcmp(argv[a], "--offline")) offline = true;
+        else if (!std::strcmp(argv[a], "--backtest") && a + 1 < argc) bt_id = argv[++a];
+        else if (!std::strcmp(argv[a], "--bt-from") && a + 1 < argc) bt_from = argv[++a];
+        else if (!std::strcmp(argv[a], "--bt-to") && a + 1 < argc) bt_to = argv[++a];
+        else if (!std::strcmp(argv[a], "--set") && a + 1 < argc) bt_sets.push_back(argv[++a]);
+        else if (!std::strcmp(argv[a], "--bt-csv") && a + 1 < argc) bt_csv = argv[++a];
         else if (!std::strcmp(argv[a], "--list-rolls")) {  // the cached market's roll points, then exit
             std::string err;
             std::vector<std::string> notes;
@@ -234,18 +317,24 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[a], "--help") || !std::strcmp(argv[a], "-h")) {
             std::printf("usage: replay_trader [--api-key KEY] [--offline] [--data nq_1m.bin] [--start \"YYYY-MM-DD HH:MM\"]\n"
                         "                     [--screenshot out.bmp] [--demo]\n"
+                        "       replay_trader --backtest STRATEGY [--bt-from YYYY-MM-DD] [--bt-to YYYY-MM-DD]\n"
+                        "                     [--set name=value ...] [--bt-csv trades.csv] [--data file | --offline]\n"
                         "API key: --api-key, NQ_API_KEY, or the one saved from the data screen.\n"
                         "Data folder: %s\n", data_dir().string().c_str());
             return 0;
         }
     }
     http_global_init();
+    std::string script_err;
+    if (!g_scripts.init(script_err)) std::fprintf(stderr, "scripts: %s\n", script_err.c_str());
+    for (const std::string& m : g_scripts.messages) std::fprintf(stderr, "scripts: %s\n", m.c_str());
     std::string key_source;
     std::string key = resolve_api_key(cli_key, key_source);
     bool headless = shot || !BK_window_supported();
 
     g_root = BK_node_new("frame");
     std::string err;
+    if (bt_id) return run_backtest_cli(bt_id, bt_from, bt_to, bt_sets, data_file, bt_csv);
     if (data_file) {  // a file from export_bars.py: no download
         if (!g.m.load(data_file, err)) {
             std::fprintf(stderr, "%s\n", err.c_str());
@@ -299,13 +388,16 @@ int main(int argc, char** argv) {
     } else {
         BK_window_wake_init(on_wake);
         g_dl.on_progress = [] { BK_window_wake(); };
+        g.bt.on_progress = [] { BK_window_wake(); };
         g_win = BK_window_new(ctx, "Replay Trader", W, H);
         BKWindowCallbacks cb{};
         cb.on_frame = on_frame;
+        cb.on_timer = on_timer;
         cb.on_close = on_close;
         BK_window_set_callbacks(g_win, &cb);
         sync();
         BK_window_show(g_win);
+        BK_window_timer(g_win, 1000);
         poke();
         BK_window_run();
         BK_window_free(g_win);
@@ -313,6 +405,8 @@ int main(int argc, char** argv) {
     }
     g_dl.on_progress = nullptr;
     g_dl.stop();
+    g.bt.on_progress = nullptr;
+    g.bt.cancel();
     BK_context_free(ctx);
     BK_node_free(g_root);
     return 0;

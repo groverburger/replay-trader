@@ -14,9 +14,39 @@
 | `src/panels.cpp` | Left-hand panels (BUI widget tree) |
 | `src/chart.cpp` | Price chart, oscillator panes and equity curve (custom-drawn BUI nodes) |
 | `src/civil.h` | Calendar arithmetic without libc time functions (they differ across platforms) |
+| `src/script.cpp` | Lua: script discovery and hot reload, definitions, params, running indicators |
+| `src/strategy.cpp` | Strategies: the `ctx` bindings, minute-by-minute driving, backtests on a worker thread, stats |
+| `scripts/lib/prelude.lua` | The Lua side of the API: `indicator`/`strategy`, `time`, `ta`, the `ctx` methods |
+| `scripts/indicators/`, `scripts/strategies/` | Built-in scripts, compiled into the binary (`cmake/embed_files.cmake`) |
 
 The UI is [BUI](https://github.com/ppmpreetham/BUI) v0.5.0, Blender's interface as a C library. On macOS it
-draws on the CPU and only redraws what changed, so an idle window uses no CPU.
+draws on the CPU and only redraws what changed, so an idle window uses no CPU. The chart therefore invalidates
+itself only when something it draws has changed (`chart_prepare` keeps a signature), not on every frame.
+
+**Scrolling patch.** `packaging/bui/precise-scroll.patch` is applied to BUI at fetch time. Upstream, the macOS
+host rounds trackpad scrolling to whole wheel notches, so scroll regions jump about 40 px at a time and the chart
+zooms in steps. With the patch:
+
+- **Trackpad input:** precise deltas reach `BK_scroll` as fractional notches. A notch is one wheel click, or 2
+  widget units.
+- **Scroll regions:** they move by exact pixels.
+- **Custom nodes:** they get fractional `wheel_x` and `wheel_y` values.
+- **Windows:** the host already sends touchpad fractions to `BK_scroll`, so it benefits too.
+
+Mouse wheels are unchanged. The chart pans 1:1 with the fingers and zooms continuously on a trackpad, and eases
+whole mouse-wheel notches.
+
+**Scripting.** Each script runs in its own environment on top of the prelude. Scripts get no file or OS access,
+and a time-limit hook stops runaway loops.
+
+- **Indicators** run on the UI thread, once per change of the visible series, params or scripts (cached per
+  indicator).
+- **Live strategies** share that Lua state and run on the replay's broker.
+- **Backtests** load the strategy into their own Lua state on a worker thread and run it on a private broker
+  over the shared, read-only market. That takes about 0.1–0.4 s per year of 1-minute data.
+
+The Lua indicators were checked against the old C++ implementations on 1m, 5m and 1h series. They match to
+within 1e-11, with identical missing-value boundaries and identical pivots.
 
 ## Data
 

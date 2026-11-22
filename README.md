@@ -11,8 +11,12 @@ next: the chart only shows minutes that have already been revealed.
 - **Any timeframe.** 1m, 5m, 15m, 30m, 1h, 4h and daily, switchable mid-replay.
 - **A realistic paper broker.** Market, limit and stop orders, brackets (stop + target), slippage and commissions,
   NQ ($20/pt) or MNQ ($2/pt). Fills follow the next minute's prices, and contract rolls never create fake P&L.
-- **Indicators.** SMA, EMA, Bollinger bands, session VWAP, swing pivots with levels, RSI, MACD, ATR and volume:
-  add as many as you like, each with its own settings and colour.
+- **Indicators you can write yourself.** SMA, EMA, Bollinger bands, VWAP with bands, swing pivots with levels,
+  RSI, MACD, ATR, volume, prior-day and overnight levels, and the opening range. Every one of them is a short
+  Lua script. Drop your own into the scripts folder and it appears in the app, with no rebuilding.
+- **Automated strategies and backtests.** Strategies are Lua scripts too. They can place market, limit and stop
+  orders with brackets, trail stops, react to fills and work on any timeframe. Let one trade the replay
+  alongside you, or backtest it over years of data in seconds, with statistics and an equity curve.
 - **Track your results.** A trade list, win rate, profit factor, max drawdown and equity curve, with CSV export.
 - **Blind practice.** Hide the dates so you can't recall what happened that day.
 
@@ -91,10 +95,43 @@ such as `20*1.5`.
 **Command line (optional).** Options are `--api-key KEY` (or set `NQ_API_KEY`), `--offline` to use the
 downloaded data without connecting, `--start "2025-04-09 09:25"` and `--demo`.
 
+`--backtest orb --bt-from 2025-01-01 --bt-to 2025-12-31 [--set qty=2] [--bt-csv trades.csv]` runs a strategy
+from the terminal and prints its statistics.
+
+## Indicators and strategies in Lua
+
+![The Strategy panel: an opening range breakout trading the replay, with its backtest statistics and equity curve](docs/strategy.png)
+
+Every indicator and strategy is a Lua file. The built-in ones are copied to `scripts/examples/` in the data
+folder for you to read and adapt. Your own go in `scripts/indicators/` and `scripts/strategies/`; the
+**Scripts folder** button opens it. Saved changes appear within a second. A minimal indicator looks like this:
+
+```lua
+return indicator {
+  name = "My EMA",
+  overlay = true,
+  params = { { "period", 50, min = 2, max = 500 } },
+  plots = { { "EMA", width = 1.6 } },
+  calc = function(bars, p, out)
+    local ema = ta.ema(p.period)
+    for i = 1, bars.n do out.EMA[i] = ema:update(bars.close[i]) end
+  end,
+}
+```
+
+Strategies see only closed bars, and their orders fill under the same rules as yours, so backtests can't peek
+ahead. The built-in strategies are an opening range breakout, an EMA trend follower on 5-minute bars and a VWAP
+mean reversion. They demonstrate brackets, stop entries, trailing stops, time stops and a daily loss limit.
+[docs/SCRIPTING.md](docs/SCRIPTING.md) is the full reference; it is also the README in your scripts folder.
+
+Backtests are hypothetical: 1-minute bars can't show queue position or fast-market slippage, and the data has a
+few gaps, which the backtest log points out.
+
 ## Building from source
 
 You need CMake 3.20 or later and a C++17 compiler: Xcode command line tools on macOS, or MSVC or MinGW-w64 on
-Windows. The UI library, [BUI](https://github.com/ppmpreetham/BUI), is downloaded and built automatically.
+Windows. The UI library, [BUI](https://github.com/ppmpreetham/BUI), and Lua 5.4 are downloaded and built
+automatically.
 
 ```sh
 cmake -S . -B build && cmake --build build -j

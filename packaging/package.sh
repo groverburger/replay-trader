@@ -13,7 +13,7 @@ rm -rf "$DIST" && mkdir -p "$DIST/stage"
 # source bundle (no build trees, data, or sessions)
 SRC="$DIST/stage/replay_trader-source"
 mkdir -p "$SRC"
-cp -R CMakeLists.txt README.md LICENSE src packaging tools docs "$SRC/"
+cp -R CMakeLists.txt README.md LICENSE src packaging tools docs scripts cmake "$SRC/"
 (cd "$DIST/stage" && zip -qr replay_trader-source.zip replay_trader-source)
 
 # macOS

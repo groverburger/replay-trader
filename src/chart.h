@@ -16,3 +16,6 @@ bool chart_animate(double dt);
 bool chart_animating();  // after chart_prepare: whether another frame is needed
 
 BKNode* equity_new();
+// The equity curve of the last backtest (g.bt_result); call backtest_curve_changed() when it changes.
+BKNode* backtest_curve_new();
+void backtest_curve_changed();

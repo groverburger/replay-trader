@@ -10,50 +10,44 @@
 #include "civil.h"
 #include "datafeed.h"
 
+#ifdef _WIN32
+#include <windows.h>
+#include <shellapi.h>
+#endif
+
 const int kTfs[kNumTfs] = {1, 5, 15, 30, 60, 240, 1440};
 const char* kTfNames[kNumTfs] = {"1m", "5m", "15m", "30m", "1h", "4h", "1D"};
 const int kSpeeds[kNumSpeeds] = {1, 2, 5, 10, 30, 60, 120, 300, 600};
-const char* kIndNames[IND_COUNT] = {"SMA", "EMA", "Bollinger bands", "VWAP (session)", "Swing pivots", "RSI", "MACD",
-                                    "ATR", "Volume"};
 static const Rgba kPalette[] = {{1.0f, 0.8f, 0.2f, 1}, {0.55f, 0.65f, 1.0f, 1}, {0.9f, 0.5f, 0.9f, 1},
                                 {0.4f, 0.9f, 0.9f, 1}, {1.0f, 0.6f, 0.3f, 1},  {0.7f, 0.9f, 0.4f, 1}};
 
 App g;
 
-std::string Ind::label() const {
-    char buf[64];
-    switch (type) {
-        case SMA: std::snprintf(buf, sizeof buf, "SMA %d", a); break;
-        case EMA: std::snprintf(buf, sizeof buf, "EMA %d", a); break;
-        case BOLL: std::snprintf(buf, sizeof buf, "BB %d, %.1f", a, k); break;
-        case PIVOTS: std::snprintf(buf, sizeof buf, "Pivots %d/%d", a, b); break;
-        case RSI: std::snprintf(buf, sizeof buf, "RSI %d", a); break;
-        case MACD: std::snprintf(buf, sizeof buf, "MACD %d/%d/%d", a, b, c); break;
-        case ATR: std::snprintf(buf, sizeof buf, "ATR %d", a); break;
-        default: std::snprintf(buf, sizeof buf, "%s", kIndNames[type]);
-    }
-    return buf;
+void Ind::refresh() const {
+    if (cached_gen == g_scripts.generation() && cached_for == params) return;
+    cached_gen = g_scripts.generation(), cached_for = params;
+    const ScriptDef* d = def();
+    label_ = d ? script_label(g_scripts.L, *d, params) : script + " (missing)";
+    warm_ = d ? script_warmup(g_scripts.L, *d, params) : 10;
 }
+const std::string& Ind::label() const { return refresh(), label_; }
+int Ind::warmup() const { return refresh(), warm_; }
 
-Ind make_ind(int type, int uid) {
-    Ind d{type, uid};
+Ind make_ind(const std::string& script, int uid) {
+    Ind d;
+    d.script = script, d.uid = uid;
     d.col = kPalette[uid % 6];
-    switch (type) {
-        case EMA: d.a = 21; break;
-        case PIVOTS: d.a = 5, d.b = 5, d.c = 1; break;
-        case RSI: d.a = 14; break;
-        case MACD: d.a = 12, d.b = 26, d.c = 9; break;
-        case ATR: d.a = 14; break;
-        default: break;
-    }
+    if (const ScriptDef* def = d.def()) d.params = default_params(*def);
     return d;
 }
 
-const Agg& App::agg() {
-    auto it = aggs.find(tf());
+const Agg& App::agg() { return agg_for(tf()); }
+
+const Agg& App::agg_for(int tf) {
+    auto it = aggs.find(tf);
     if (it == aggs.end()) {
-        it = aggs.emplace(tf(), Agg{}).first;
-        it->second.build(m, tf());
+        it = aggs.emplace(tf, Agg{}).first;
+        it->second.build(m, tf);
     }
     return it->second;
 }
@@ -86,6 +80,10 @@ void advance(size_t n) {
         float d = g.m.adj[g.cursor] - g.m.adj[g.cursor - 1];
         if (d != 0) g.broker.roll(d, g.m.t[g.cursor]);
         g.broker.on_bar(g.m, g.cursor);
+        if (g.auto_trade) {
+            g.strat.after_minute(g.cursor);
+            if (!g.strat.running()) g.auto_trade = false, g.status = "strategy stopped: " + g.strat.error();
+        }
     }
     if (g.cursor + 1 >= g.m.size()) g.playing = false;
 }
@@ -112,6 +110,7 @@ void new_session(size_t cursor, const char* why) {
     g.s_cursor = SIZE_MAX;
     g.ticket_price = 0;
     g.status = why;
+    if (g.auto_trade) start_strategy();  // a fresh start on the new day
 }
 
 void random_day() {
@@ -158,6 +157,7 @@ void refresh_series() {
     if (g.s_cursor == g.cursor && g.s_lo == lo && g.s_tf == g.tf()) return;
     build_series(g.m, a, g.cursor, lo, g.s);
     g.s_cursor = g.cursor, g.s_lo = lo, g.s_tf = g.tf();
+    ++g.s_version;
 }
 
 void update_view() {
@@ -227,6 +227,53 @@ void export_csv() {
                      r.pnl);
     std::fclose(f);
     g.status = "saved " + path;
+}
+
+// ---------------------------------------------------------------- strategies
+void select_strategy(const std::string& id) {
+    if (g.strat_id == id && !g.strat_params.empty()) return;
+    stop_strategy();
+    g.strat_id = id;
+    const ScriptDef* d = g_scripts.find(true, id);
+    g.strat_params = d ? default_params(*d) : Params{};
+}
+
+bool start_strategy() {
+    const ScriptDef* d = g_scripts.find(true, g.strat_id);
+    if (!d) {
+        g.auto_trade = false;
+        g.status = "no strategy selected";
+        return false;
+    }
+    if (g.strat_params.size() != d->params.size()) g.strat_params = default_params(*d);
+    const Agg* a = d->timeframe > 1 ? &g.agg_for(d->timeframe) : nullptr;
+    if (!g.strat.start(g_scripts.L, *d, g.strat_params, &g.broker, &g.m, a, g.cursor, &g.broker.log)) {
+        g.auto_trade = false;
+        g.status = "strategy error: " + g.strat.error();
+        return false;
+    }
+    g.auto_trade = true;
+    g.broker.log.push_back(d->name + " is trading the replay");
+    return true;
+}
+
+void stop_strategy() {
+    if (g.auto_trade) g.broker.log.push_back(g.strat.name() + " stopped");
+    g.auto_trade = false;
+    g.strat.stop();
+}
+
+void open_scripts_folder() {
+    std::filesystem::path p = g_scripts.user_dir();
+#ifdef _WIN32
+    ShellExecuteW(nullptr, L"open", p.c_str(), nullptr, nullptr, SW_SHOWNORMAL);
+#elif defined(__APPLE__)
+    std::string cmd = "open \"" + p.string() + "\"";
+    if (std::system(cmd.c_str()) != 0) g.status = "scripts folder: " + p.string();
+#else
+    std::string cmd = "xdg-open \"" + p.string() + "\" &";
+    if (std::system(cmd.c_str()) != 0) g.status = "scripts folder: " + p.string();
+#endif
 }
 
 // mods: 1 Shift; any other bit (Ctrl/Cmd, Alt) leaves the key to the system.

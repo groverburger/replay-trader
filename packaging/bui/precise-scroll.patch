@@ -1,0 +1,103 @@
+diff --git a/kit/intern/kit_core.c b/kit/intern/kit_core.c
+index bc3f09a..de61c7f 100644
+--- a/kit/intern/kit_core.c
++++ b/kit/intern/kit_core.c
+@@ -3361,12 +3361,28 @@ int BK_scroll(BKContext *ctx, int x, int y, float dx, float dy, int mods)
+     ctx->in_input--;
+     return 1;
+   }
+-  int r = 0;
+-  if (dy != 0.0f) {
+-    r |= BK_wheel(ctx, x, y, dy > 0.0f ? 1 : -1, mods);
++  /* replay-trader patch: precise vertical deltas scroll the nearest scroll region that can still move, by
++   * exact pixels (a notch is 2 widget units, as scroll_wheel); everything else gets whole notches once enough
++   * has accumulated */
++  if (dy != 0.0f && !(mods & BK_CTRL) && !ctx->modal) {
++    for (BKNode *n = t; n; n = n->parent) {
++      if (n->cls == &bk_cls_scroll && NODE_ENABLED(n) && bk_scroll_by_px(n, dy * 2.0f * (float)BK_unit())) {
++        return 1;
++      }
++    }
+   }
+-  if (dx != 0.0f) { /* X11's buttons 6 / 7: Shift + wheel, left = up */
+-    r |= BK_wheel(ctx, x, y, dx > 0.0f ? -1 : 1, mods | BK_SHIFT);
++  static float acc_x = 0.0f, acc_y = 0.0f;
++  acc_x += dx, acc_y += dy;
++  int r = 0;
++  while (fabsf(acc_y) >= 1.0f) {
++    const int d = acc_y > 0.0f ? 1 : -1;
++    acc_y -= (float)d;
++    r |= BK_wheel(ctx, x, y, d, mods);
++  }
++  while (fabsf(acc_x) >= 1.0f) { /* X11's buttons 6 / 7: Shift + wheel, left = up */
++    const int d = acc_x > 0.0f ? 1 : -1;
++    acc_x -= (float)d;
++    r |= BK_wheel(ctx, x, y, -d, mods | BK_SHIFT);
+   }
+   return r;
+ }
+diff --git a/kit/intern/kit_intern.h b/kit/intern/kit_intern.h
+index 6542312..22e77f8 100644
+--- a/kit/intern/kit_intern.h
++++ b/kit/intern/kit_intern.h
+@@ -602,6 +602,7 @@ void bk_theme_env_init(void);
+ extern const BKClass bk_cls_custom;
+ extern const BKClass bk_cls_video; /* image/video.c */
+ #define BK_IS_CUSTOM(n) ((n) && (n)->cls == &bk_cls_custom)
++int bk_scroll_by_px(BKNode *n, float px); /* replay-trader patch (kit_widgets.c) */
+ /* Delivers an event (fills x, y relative to the node); returns its result. */
+ int bk_custom_event(BKNode *n, BKCustomEvent *e, int wx, int wy);
+ void bk_custom_frames(BKContext *ctx);       /* BK_render: frame callbacks due */
+diff --git a/kit/intern/kit_widgets.c b/kit/intern/kit_widgets.c
+index 441d478..f6e234f 100644
+--- a/kit/intern/kit_widgets.c
++++ b/kit/intern/kit_widgets.c
+@@ -1239,6 +1239,29 @@ static int scroll_drag(BKNode *n, BKEvent *e)
+   return 1;
+ }
+ 
++/* replay-trader patch: scroll by a precise pixel delta (> 0: content moves down, as a wheel turned away);
++ * the sub-pixel remainder is kept per region. Returns 1 when the region moved. */
++int bk_scroll_by_px(BKNode *n, float px)
++{
++  static BKNode *last = NULL;
++  static float rest = 0.0f;
++  if (n != last) {
++    last = n, rest = 0.0f;
++  }
++  rest += px;
++  const int step = (int)rest;
++  if (step == 0) {
++    return scroll_max(n) > 0 && ((px > 0.0f && n->scroll > 0) || (px < 0.0f && n->scroll < scroll_max(n)));
++  }
++  rest -= (float)step;
++  const int old = n->scroll;
++  scroll_set(n, n->scroll - step);
++  if (n->scroll == old) {
++    rest = 0.0f;
++  }
++  return n->scroll != old;
++}
++
+ static int scroll_wheel(BKNode *n, BKEvent *e)
+ {
+   if (EV_CTRL(e)) {
+diff --git a/kit/intern/kit_window_cocoa.m b/kit/intern/kit_window_cocoa.m
+index 1c26c73..6417379 100644
+--- a/kit/intern/kit_window_cocoa.m
++++ b/kit/intern/kit_window_cocoa.m
+@@ -534,6 +534,14 @@ static CGColorSpaceRef srgb(void)
+     dx *= BK_SCROLL_STEP; /* line deltas */
+     dy *= BK_SCROLL_STEP;
+   }
++  if ([ev hasPreciseScrollingDeltas] && !(mods & BK_CTRL)) {
++    /* replay-trader patch: pass trackpad deltas through unquantized, in wheel notches (a notch scrolls
++     * 2 widget units), so scroll regions follow the fingers pixel for pixel and custom nodes get
++     * fractional wheel deltas */
++    const double notch = 2.0 * BK_unit() / (bk->px > 0 ? bk->px : 1.0); /* points */
++    BK_scroll(bk->ctx, x, y, (float)(dx / notch), (float)(dy / notch), mods);
++    return;
++  }
+   bk->scroll_x += dx;
+   bk->scroll_y += dy;
+   for (int i = 0; i < 8 && bk && fabs(bk->scroll_y) >= BK_SCROLL_STEP; i++) {

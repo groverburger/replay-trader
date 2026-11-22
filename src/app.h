@@ -10,11 +10,10 @@
 
 #include "broker.h"
 #include "market.h"
+#include "rgba.h"
+#include "script.h"
+#include "strategy.h"
 
-struct Rgba {
-    float r, g, b, a;
-    Rgba alpha(float x) const { return {r, g, b, x}; }
-};
 
 const Rgba kUp{0.15f, 0.65f, 0.60f, 1.0f}, kDown{0.94f, 0.33f, 0.31f, 1.0f};
 const Rgba kBuy{0.30f, 0.85f, 0.45f, 1.0f}, kSell{1.00f, 0.45f, 0.35f, 1.0f};
@@ -24,21 +23,25 @@ extern const int kTfs[kNumTfs];
 extern const char* kTfNames[kNumTfs];
 extern const int kSpeeds[kNumSpeeds];  // minutes revealed per second
 
-// ---------------------------------------------------------------- indicators the user can add
-enum IndType { SMA, EMA, BOLL, VWAP, PIVOTS, RSI, MACD, ATR, VOLUME, IND_COUNT };
-extern const char* kIndNames[IND_COUNT];
-
+// ---------------------------------------------------------------- indicators the user added (Lua scripts)
 struct Ind {
-    int type, uid;
-    int a = 20, b = 0, c = 0;  // periods: SMA/EMA a; BOLL a; PIVOTS left a, right b, levels c; RSI a;
-    float k = 2.0f;            // MACD a,b,c = fast, slow, signal; ATR a; BOLL k = std devs
-    Rgba col;
+    std::string script;        // ScriptDef id (file name without .lua)
+    int uid = 0;
+    Params params;
+    Rgba col{1, 1, 1, 1};      // the indicator's colour (plots without their own)
     bool on = true;
-    std::string label() const;
-    bool oscillator() const { return type == RSI || type == MACD || type == ATR || type == VOLUME; }
-    int warmup() const { return type == MACD ? 4 * (b + c) : type == PIVOTS ? a + b + 1 : 4 * a + 10; }
+    const ScriptDef* def() const { return g_scripts.find(false, script); }
+    // label and warm-up bars, recomputed when the params or the scripts change
+    const std::string& label() const;
+    int warmup() const;
+
+    mutable Params cached_for;
+    mutable int cached_gen = -1;
+    mutable std::string label_;
+    mutable int warm_ = 300;
+    void refresh() const;
 };
-Ind make_ind(int type, int uid);
+Ind make_ind(const std::string& script, int uid);
 
 // ---------------------------------------------------------------- app state
 struct App {
@@ -60,14 +63,24 @@ struct App {
     std::vector<Ind> inds;
     int next_uid = 0;
     Series s;
+    long s_version = 0;         // bumped whenever s is rebuilt (indicator caches key on it)
     size_t s_cursor = SIZE_MAX;
     int64_t s_lo = -1;
     int s_tf = -1;
     std::string status;
+    // strategy: auto-trading the replay, and backtests
+    std::string strat_id;
+    Params strat_params;
+    bool auto_trade = false;
+    StrategyRun strat;
+    Backtest bt;
+    BacktestResult bt_result;
+    int bt_seen = 0;            // bt.runs() whose result is in bt_result
     std::mt19937 rng{std::random_device{}()};
 
     int tf() const { return kTfs[tf_idx]; }
     const Agg& agg();
+    const Agg& agg_for(int tf);
     double last() const { return m.c[cursor]; }
     int64_t now() const { return m.t[cursor] + 1; }  // the revealed bar has closed
 };
@@ -99,6 +112,12 @@ void click_order(double price, bool limit);  // chart Ctrl/Cmd+click (limit) or 
 void flatten();
 void reverse();
 void export_csv();
+
+// Strategy auto-trading in the replay (on the replay's broker, from the current bar).
+bool start_strategy();
+void stop_strategy();
+void select_strategy(const std::string& id);
+void open_scripts_folder();
 
 // Keyboard shortcuts shared by the window and the focused chart. Returns true when the key was used.
 bool hotkey(const char* keysym, int mods);

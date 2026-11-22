@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <climits>
+#include <map>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -15,7 +16,7 @@
 #include "BUI_kit.h"
 #include "GPU_raster.h"
 #include "app.h"
-#include "indicators.h"
+#include "script.h"
 #include "ui.h"
 
 namespace {
@@ -115,25 +116,48 @@ uint32_t pack(Rgba c) {
 }
 
 // ---------------------------------------------------------------- model: computed once per frame in chart_prepare
-struct Overlay {
-    Ind d;
-    ind::Vec a, b, c;                // SMA/EMA/VWAP/ATR/RSI: a; BOLL: mid, up, lo; MACD: line, signal, hist
-    std::vector<ind::Pivot> piv;
+using Vec = std::vector<double>;
+
+// An indicator's output for the current series, with what's needed to draw it.
+struct IndResult {
+    int uid = 0;
+    const ScriptDef* def = nullptr;
+    std::string label;
+    Rgba col{1, 1, 1, 1};
+    IndOutput out;
+    Rgba plot_color(size_t k) const {
+        const PlotDef& p = def->plots[k];
+        Rgba c = p.has_color ? p.color : col;
+        c.a *= p.alpha;
+        return c;
+    }
 };
 
 struct PaneModel {
     bool price = true;
-    Overlay osc;                     // oscillator panes
+    int result = -1;                 // oscillator panes: index into Model::results
     double ymin = 0, ymax = 1;
 };
 
 struct Model {
-    std::vector<Overlay> overlays;   // drawn on the price pane
+    std::vector<IndResult> results;
+    std::vector<int> overlays;       // results drawn on the price pane
     std::vector<PaneModel> panes;
-    size_t n = 0;                    // series length the vectors were computed for
+    size_t n = 0;                    // series length the results were computed for
 } M;
 
-void fit(double& lo, double& hi, std::initializer_list<const ind::Vec*> ys, double pad_frac) {
+// Indicator results are recomputed only when the series, the params or the scripts change.
+struct CachedResult {
+    long series = -1;
+    int gen = -1;
+    std::string script;
+    Params params;
+    IndOutput out;
+};
+std::map<int, CachedResult> g_cache;   // by indicator uid
+std::map<int, std::string> g_errors;   // last error reported per indicator
+
+void fit(double& lo, double& hi, std::initializer_list<const Vec*> ys, double pad_frac) {
     long j0, j1;
     visible_range(j0, j1);
     lo = INFINITY, hi = -INFINITY;
@@ -225,7 +249,7 @@ struct ChartState {
 const float kFont = 11.0f;
 
 // ---------------------------------------------------------------- drawing
-void draw_series_line(const Painter& P, const Layout& L, const Pane& pn, const ind::Vec& y, Rgba c, float w) {
+void draw_series_line(const Painter& P, const Layout& L, const Pane& pn, const Vec& y, Rgba c, float w) {
     long j0, j1;
     visible_range(j0, j1);
     j0 = std::max(0L, j0 - 1), j1 = std::min(static_cast<long>(y.size()) - 1, j1 + 1);
@@ -243,15 +267,31 @@ void draw_series_line(const Painter& P, const Layout& L, const Pane& pn, const i
     }
 }
 
-void draw_bars(const Painter& P, const Layout& L, const Pane& pn, const ind::Vec& y, Rgba c) {
+// Histogram bars from zero; by_bar colours each by its candle's direction (alpha from c).
+void draw_bars(const Painter& P, const Layout& L, const Pane& pn, const Vec& y, Rgba c, bool by_bar = false) {
     long j0, j1;
     visible_range(j0, j1);
     float half = std::max(0.5f, static_cast<float>(L.ppb() * 0.35)), base = pn.py(std::clamp(0.0, pn.ymin, pn.ymax));
     for (long j = j0; j <= j1 && j < static_cast<long>(y.size()); ++j)
         if (std::isfinite(y[j])) {
             float px = L.px(static_cast<double>(g.s.x0 + j));
-            P.rect(px - half, base, px + half, pn.py(y[j]), c, pn.box);
+            Rgba k = by_bar ? (g.s.c[j] >= g.s.o[j] ? kUp : kDown).alpha(c.a) : c;
+            P.rect(px - half, base, px + half, pn.py(y[j]), k, pn.box);
         }
+}
+
+// Horizontal steps: each bar's value across its own width (levels that change from day to day).
+void draw_steps(const Painter& P, const Layout& L, const Pane& pn, const Vec& y, Rgba c, float w) {
+    long j0, j1;
+    visible_range(j0, j1);
+    for (long j = std::max(0L, j0 - 1); j <= j1 + 1 && j < static_cast<long>(y.size()); ++j) {
+        if (!std::isfinite(y[j])) continue;
+        long k = j;  // extend over the run of equal values
+        while (k + 1 < static_cast<long>(y.size()) && k + 1 <= j1 + 1 && y[k + 1] == y[j]) ++k;
+        float py = pn.py(y[j]);
+        P.line(L.px(g.s.x0 + j - 0.5), py, L.px(g.s.x0 + k + 0.5), py, w * L.s, c, pn.box);
+        j = k;
+    }
 }
 
 void draw_candles(const Painter& P, const Layout& L, const Pane& pn) {
@@ -344,53 +384,56 @@ void tag(const Painter& P, const Layout& L, const Pane& pn, double v, Rgba bg, c
     P.text(L.axis_x + 5 * L.s, y, s, kFont * L.s, lum > 0.5f ? Rgba{0.05f, 0.05f, 0.05f, 1} : Rgba{1, 1, 1, 1});
 }
 
-void draw_overlays(const Painter& P, const Layout& L, const Pane& pn) {
+// One indicator's output: fills, then plots in order, then level segments and markers.
+void draw_result(const Painter& P, const Layout& L, const Pane& pn, const IndResult& r) {
+    if (!r.def || !r.out.error.empty()) return;
     const Series& s = g.s;
     long j0, j1;
     visible_range(j0, j1);
-    for (const Overlay& o : M.overlays) {
-        const Ind& d = o.d;
-        switch (d.type) {
-            case SMA: case EMA: draw_series_line(P, L, pn, o.a, d.col, 1.4f); break;
-            case VWAP: draw_series_line(P, L, pn, o.a, d.col, 1.6f); break;
-            case BOLL: {
-                std::vector<BuiMeshVertex> v;
-                std::vector<uint32_t> idx;
-                uint32_t col = pack(d.col.alpha(0.08f));
-                for (long j = std::max(0L, j0 - 1); j <= j1 && j + 1 < static_cast<long>(o.b.size()); ++j) {
-                    if (!std::isfinite(o.b[j]) || !std::isfinite(o.b[j + 1])) continue;
-                    float xa = L.px(s.x0 + j), xb = L.px(s.x0 + j + 1);
-                    uint32_t k = static_cast<uint32_t>(v.size());
-                    v.push_back({xa, pn.py(o.b[j]), 0, 0, col});
-                    v.push_back({xa, pn.py(o.c[j]), 0, 0, col});
-                    v.push_back({xb, pn.py(o.b[j + 1]), 0, 0, col});
-                    v.push_back({xb, pn.py(o.c[j + 1]), 0, 0, col});
-                    for (uint32_t t : {0u, 1u, 2u, 2u, 1u, 3u}) idx.push_back(k + t);
-                }
-                P.mesh(v, idx, pn.box);
-                draw_series_line(P, L, pn, o.b, d.col, 1.0f);
-                draw_series_line(P, L, pn, o.c, d.col, 1.0f);
-                draw_series_line(P, L, pn, o.a, d.col.alpha(0.6f), 1.0f);
-                break;
-            }
-            case PIVOTS: {
-                float sz = 4 * L.s, off = 4 * L.s;
-                for (const auto& p : o.piv) {
-                    if (p.i >= s.n()) continue;
-                    float x = L.px(static_cast<double>(s.x0 + p.i)), y = pn.py(p.price);
-                    if (d.c) {  // level until it is traded through
-                        long end = p.broken >= 0 ? p.broken : static_cast<long>(s.n()) - 1;
-                        if (end >= j0 && static_cast<long>(p.i) <= j1)
-                            P.line(x, y, L.px(static_cast<double>(s.x0 + end)), y, 1, d.col.alpha(p.broken >= 0 ? 0.25f : 0.6f), pn.box);
-                    }
-                    if (static_cast<long>(p.i) < j0 || static_cast<long>(p.i) > j1 || !pn.box.in(x, y)) continue;
-                    if (p.high) P.tri(x, y - off, x - sz, y - off - 7 * L.s, x + sz, y - off - 7 * L.s, d.col);
-                    else P.tri(x, y + off, x - sz, y + off + 7 * L.s, x + sz, y + off + 7 * L.s, d.col);
-                }
-                break;
-            }
-            default: break;
+    if (!pn.pm->price)
+        for (double lv : r.def->levels) P.line(pn.box.x0, pn.py(lv), pn.box.x1, pn.py(lv), 1, {1, 1, 1, 0.3f}, pn.box);
+    for (const FillDef& f : r.def->fills) {
+        const Vec &a = r.out.plots[f.a], &b = r.out.plots[f.b];
+        std::vector<BuiMeshVertex> v;
+        std::vector<uint32_t> idx;
+        uint32_t col = pack(r.plot_color(f.a).alpha(f.alpha));
+        for (long j = std::max(0L, j0 - 1); j <= j1 && j + 1 < static_cast<long>(a.size()); ++j) {
+            if (!std::isfinite(a[j]) || !std::isfinite(a[j + 1]) || !std::isfinite(b[j]) || !std::isfinite(b[j + 1])) continue;
+            float xa = L.px(s.x0 + j), xb = L.px(s.x0 + j + 1);
+            uint32_t k = static_cast<uint32_t>(v.size());
+            v.push_back({xa, pn.py(a[j]), 0, 0, col});
+            v.push_back({xa, pn.py(b[j]), 0, 0, col});
+            v.push_back({xb, pn.py(a[j + 1]), 0, 0, col});
+            v.push_back({xb, pn.py(b[j + 1]), 0, 0, col});
+            for (uint32_t t : {0u, 1u, 2u, 2u, 1u, 3u}) idx.push_back(k + t);
         }
+        P.mesh(v, idx, pn.box);
+    }
+    for (size_t k = 0; k < r.def->plots.size(); ++k) {
+        const PlotDef& p = r.def->plots[k];
+        Rgba c = r.plot_color(k);
+        switch (p.style) {
+            case PlotDef::Line: draw_series_line(P, L, pn, r.out.plots[k], c, p.width); break;
+            case PlotDef::Step: draw_steps(P, L, pn, r.out.plots[k], c, p.width); break;
+            case PlotDef::Histogram: draw_bars(P, L, pn, r.out.plots[k], c, p.color_by_bar); break;
+            case PlotDef::Markers: break;
+        }
+    }
+    for (const IndSegment& sg : r.out.segments) {
+        if (sg.i1 < j0 || sg.i0 > j1) continue;
+        float y = pn.py(sg.price);
+        Rgba c = r.plot_color(static_cast<size_t>(sg.plot));
+        c.a *= sg.alpha;
+        P.line(L.px(static_cast<double>(s.x0 + sg.i0)), y, L.px(static_cast<double>(s.x0 + sg.i1)), y, 1, c, pn.box);
+    }
+    float sz = 4 * L.s, off = 4 * L.s;
+    for (const IndMarker& mk : r.out.markers) {
+        if (mk.i < j0 || mk.i > j1) continue;
+        float x = L.px(static_cast<double>(s.x0 + mk.i)), y = pn.py(mk.price);
+        if (!pn.box.in(x, y)) continue;
+        Rgba c = r.plot_color(static_cast<size_t>(mk.plot));
+        if (mk.up) P.tri(x, y + off, x - sz, y + off + 7 * L.s, x + sz, y + off + 7 * L.s, c);
+        else P.tri(x, y - off, x - sz, y - off - 7 * L.s, x + sz, y - off - 7 * L.s, c);
     }
 }
 
@@ -439,33 +482,24 @@ void draw_legend(const Painter& P, const Layout& L, const Pane& pn, Rgba text) {
         P.text(x + 14 * s, y, t, size, text);
         y += 15 * s;
     };
+    auto result_entries = [&](const IndResult& r, bool all_plots) {
+        if (!r.out.error.empty()) {
+            entry(r.label + "  (script error, see log)", kSell);
+            return;
+        }
+        entry(r.label, r.col);
+        if (all_plots && r.def)  // oscillators: name the plots that have colours of their own
+            for (size_t k = 0; k < r.def->plots.size(); ++k)
+                if (r.def->plots[k].has_color && r.def->plots[k].style == PlotDef::Line) entry(r.def->plots[k].name, r.plot_color(k));
+    };
     if (pn.pm->price) {
         char buf[32];
         std::snprintf(buf, sizeof buf, "NQ %s", kTfNames[g.tf_idx]);
         P.text(x, y, buf, size * 1.1f, text);
         y += 16 * s;
-        for (const Overlay& o : M.overlays) entry(o.d.label(), o.d.col);
-    } else {
-        entry(pn.pm->osc.d.label(), pn.pm->osc.d.col);
-        if (pn.pm->osc.d.type == MACD) entry("signal", {1, 0.6f, 0.3f, 1});
-    }
-}
-
-void draw_oscillator(const Painter& P, const Layout& L, const Pane& pn) {
-    const Overlay& o = pn.pm->osc;
-    switch (o.d.type) {
-        case RSI:
-            for (double lv : {30.0, 70.0}) P.line(pn.box.x0, pn.py(lv), pn.box.x1, pn.py(lv), 1, {1, 1, 1, 0.3f}, pn.box);
-            draw_series_line(P, L, pn, o.a, o.d.col, 1.4f);
-            break;
-        case MACD:
-            draw_bars(P, L, pn, o.c, {0.6f, 0.6f, 0.6f, 0.6f});
-            draw_series_line(P, L, pn, o.a, o.d.col, 1.4f);
-            draw_series_line(P, L, pn, o.b, {1, 0.6f, 0.3f, 1}, 1.0f);
-            break;
-        case ATR: draw_series_line(P, L, pn, o.a, o.d.col, 1.4f); break;
-        case VOLUME: draw_bars(P, L, pn, g.s.v, o.d.col.alpha(0.7f)); break;
-        default: break;
+        for (int k : M.overlays) result_entries(M.results[k], false);
+    } else if (pn.pm->result >= 0) {
+        result_entries(M.results[pn.pm->result], true);
     }
 }
 
@@ -525,10 +559,10 @@ void chart_draw(void*, BKNode*, BuiRaster* r, const int rect[4]) {
         draw_sessions(P, L, pn);
         if (pn.pm->price) {
             draw_candles(P, L, pn);
-            draw_overlays(P, L, pn);
+            for (int k : M.overlays) draw_result(P, L, pn, M.results[k]);
             draw_trading(P, L, pn);
-        } else {
-            draw_oscillator(P, L, pn);
+        } else if (pn.pm->result >= 0) {
+            draw_result(P, L, pn, M.results[pn.pm->result]);
         }
         draw_legend(P, L, pn, text.alpha(0.85f));
     }
@@ -555,8 +589,7 @@ const Order* order_near(const Layout& L, const Pane& pn, float y) {
 }
 
 constexpr double kMinSpan = 10, kMaxSpan = 20000;  // bars in view (refresh_series keeps 60,000 buckets loaded)
-constexpr double kZoomStep = 0.93;                 // per wheel notch; a trackpad sends many small notches
-constexpr double kPanStep = 0.03;                  // fraction of the view per sideways notch
+constexpr double kZoomStep = 0.88;                 // per wheel notch (a trackpad sends fractions of one)
 
 // Keeps a scrolled-back view on the data: at most half the view before the first bar or after the cursor, and
 // never further back than the bars refresh_series loads.
@@ -590,12 +623,17 @@ void set_span(double span) {
     clamp_view();
 }
 
-void zoom(const Layout& L, double factor, float anchor_px) {
+// eased: whole mouse-wheel notches glide; immediate: trackpad fractions already arrive continuously
+void zoom(const Layout& L, double factor, float anchor_px, bool eased) {
     if (!Z.on) Z.target = current_span();
     Z.target = std::clamp(Z.target * factor, kMinSpan, kMaxSpan);
     Z.anchor_frac = std::clamp((anchor_px - L.plot.x0) / L.plot.w(), 0.0f, 1.0f);
     Z.anchor_x = g.xmin + Z.anchor_frac * (g.xmax - g.xmin);
     Z.on = true;
+    if (!eased) {
+        set_span(Z.target);
+        Z.on = false;
+    }
 }
 
 double g_pan_left = 0;  // bars of a wheel pan still to glide through
@@ -608,10 +646,11 @@ void pan_now(double bars) {
     Z.anchor_x += g.xmin - before;  // a zoom easing at the same time (diagonal swipe) keeps the pan
 }
 
-void pan(double bars) {  // wheel / trackpad: eased like the zoom
+void pan(double bars, bool eased) {  // eased for mouse notches, immediate (1:1) for a trackpad
     if (g.follow) Z.on = false;  // leaving follow mode: the zoom anchor below is about to move
     g.follow = false;
-    g_pan_left += bars;
+    if (eased) g_pan_left += bars;
+    else pan_now(bars);
 }
 
 int chart_event(void*, BKNode* node, const BKCustomEvent* e) {
@@ -660,10 +699,12 @@ int chart_event(void*, BKNode* node, const BKCustomEvent* e) {
         case BK_CUSTOM_WHEEL: {
             // Vertical scrolling zooms, sideways scrolling pans. The macOS host turns trackpad scrolling into
             // whole notches and sends a sideways swipe as Shift + vertical notches, so Shift means sideways.
+            // A notch is one wheel click (2 widget units of scrolling); trackpads send fractions of one.
             double h = e->wheel_x, v = e->wheel_y;
             if ((e->mods & BK_SHIFT) && h == 0) h = v, v = 0;
-            if (h != 0) pan(-h * kPanStep * (g.xmax - g.xmin));
-            if (v != 0) zoom(L, std::pow(kZoomStep, v), e->x);
+            auto whole = [](double d) { return d == std::round(d); };
+            if (h != 0) pan(-h * 2.0 * BK_unit() / L.ppb(), whole(h));  // the chart follows the fingers
+            if (v != 0) zoom(L, std::pow(kZoomStep, v), e->x, whole(v));
             break;
         }
         case BK_CUSTOM_KEY:
@@ -671,31 +712,44 @@ int chart_event(void*, BKNode* node, const BKCustomEvent* e) {
             break;
         default: return 0;
     }
+    BK_node_invalidate(node);  // hover crosshair, drags: chart_prepare only sees state changes
     poke();
     return 1;
 }
 
-// ---------------------------------------------------------------- equity curve
-void equity_draw(void*, BKNode*, BuiRaster* r, const int rect[4]) {
+// ---------------------------------------------------------------- equity curves
+// Cumulative $ after each trade, for the replay's trades and for backtests.
+void draw_curve(BuiRaster* r, const int rect[4], const std::vector<double>& eq_in, const char* empty) {
     Painter P{r, static_cast<float>(rect[0]), static_cast<float>(rect[1])};
     float s = ui_scale(), w = static_cast<float>(rect[2]), h = static_cast<float>(rect[3]);
     Rgba region = theme("region_bg", {0.19f, 0.19f, 0.19f, 1}), text = theme("text", {0.9f, 0.9f, 0.9f, 1});
     P.round_rect(0, 0, w, h, 3 * s, {region.r * 0.72f, region.g * 0.72f, region.b * 0.72f, 1});
-    const auto& tr = g.broker.trips;
-    if (tr.empty()) {
-        P.text(8 * s, h / 2, "equity curve: no closed trades yet", kFont * s, text.alpha(0.45f));
+    if (eq_in.empty()) {
+        P.text(8 * s, h / 2, empty, kFont * s, text.alpha(0.45f));
         return;
     }
     std::vector<double> eq{0};
-    for (const RoundTrip& t : tr) eq.push_back(eq.back() + t.pnl);
+    eq.insert(eq.end(), eq_in.begin(), eq_in.end());
     double lo = std::min(0.0, *std::min_element(eq.begin(), eq.end())), hi = std::max(0.0, *std::max_element(eq.begin(), eq.end()));
     if (hi - lo < 1) hi = lo + 1;
-    Box b{6 * s, 6 * s, w - 6 * s, h - 6 * s};
+    Box b{4 * s, 4 * s, w - 4 * s, h - 4 * s};
     auto px = [&](size_t i) { return b.x0 + b.w() * static_cast<float>(i) / std::max<size_t>(1, eq.size() - 1); };
     auto py = [&](double v) { return b.y1 - static_cast<float>((v - lo) / (hi - lo)) * b.h(); };
     P.line(b.x0, py(0), b.x1, py(0), 1, text.alpha(0.2f), b);
-    for (size_t i = 1; i < eq.size(); ++i) P.line(px(i - 1), py(eq[i - 1]), px(i), py(eq[i]), 1.5f * s, eq.back() >= 0 ? kBuy : kSell, b);
+    size_t step = std::max<size_t>(1, eq.size() / static_cast<size_t>(std::max(1.0f, b.w())));
+    for (size_t i = step; i < eq.size(); i += step) P.line(px(i - step), py(eq[i - step]), px(i), py(eq[i]), 1.5f * s, eq.back() >= 0 ? kBuy : kSell, b);
     P.text(b.x0 + 2 * s, b.y0 + 6 * s, fmt("%+.0f", eq.back()), kFont * s, text.alpha(0.7f));
+}
+
+void equity_draw(void*, BKNode*, BuiRaster* r, const int rect[4]) {
+    std::vector<double> eq;
+    double v = 0;
+    for (const RoundTrip& t : g.broker.trips) eq.push_back(v += t.pnl);
+    draw_curve(r, rect, eq, "equity curve: no closed trades yet");
+}
+
+void bt_curve_draw(void*, BKNode*, BuiRaster* r, const int rect[4]) {
+    draw_curve(r, rect, g.bt_result.equity, "backtest equity: run a backtest");
 }
 
 }  // namespace
@@ -762,6 +816,7 @@ void chart_prepare() {
     const Series& s = g.s;
     M.overlays.clear();
     M.panes.clear();
+    M.results.clear();
     M.n = s.n();
     PaneModel price;
     fit(price.ymin, price.ymax, {&s.l, &s.h}, 0.0);
@@ -781,38 +836,72 @@ void chart_prepare() {
     M.panes.push_back(price);
     for (const Ind& d : g.inds) {
         if (!d.on) continue;
-        Overlay o{d};
-        switch (d.type) {
-            case SMA: o.a = ind::sma(s.c, d.a); break;
-            case EMA: o.a = ind::ema(s.c, d.a); break;
-            case VWAP: o.a = ind::vwap(s); break;
-            case BOLL: ind::bollinger(s.c, d.a, d.k, o.a, o.b, o.c); break;
-            case PIVOTS: o.piv = ind::pivots(s, d.a, d.b); break;
-            case RSI: o.a = ind::rsi(s.c, d.a); break;
-            case MACD: ind::macd(s.c, d.a, d.b, d.c, o.a, o.b, o.c); break;
-            case ATR: o.a = ind::atr(s, d.a); break;
-            default: break;
+        IndResult r;
+        r.uid = d.uid, r.def = d.def(), r.label = d.label(), r.col = d.col;
+        if (!r.def) {
+            r.out.error = "script " + d.script + " not found";
+        } else {
+            CachedResult& c = g_cache[d.uid];
+            if (c.series != g.s_version || c.gen != g_scripts.generation() || c.script != d.script || c.params != d.params) {
+                run_indicator(*r.def, d.params, s, g.tf(), g.s_version, c.out);
+                c.series = g.s_version, c.gen = g_scripts.generation(), c.script = d.script, c.params = d.params;
+            }
+            r.out = c.out;
+            if (r.out.error.empty() && !r.def->error.empty()) r.out.error = r.def->error;
         }
-        if (!d.oscillator()) {
-            M.overlays.push_back(std::move(o));
+        if (!r.out.error.empty() && g_errors[d.uid] != r.out.error) {  // report each new error once
+            g_errors[d.uid] = r.out.error;
+            g.broker.log.push_back(r.label + ": " + r.out.error.substr(0, r.out.error.find('\n')));
+            g_scripts.messages.push_back(r.out.error);
+        }
+        M.results.push_back(std::move(r));
+        int idx = static_cast<int>(M.results.size()) - 1;
+        const IndResult& res = M.results.back();
+        if (!res.def || res.def->overlay) {
+            M.overlays.push_back(idx);
             continue;
         }
         PaneModel pm;
-        pm.price = false;
-        pm.osc = std::move(o);
-        const Overlay& q = pm.osc;
-        if (d.type == RSI) pm.ymin = 0, pm.ymax = 100;
-        else if (d.type == MACD) fit(pm.ymin, pm.ymax, {&q.a, &q.b, &q.c}, 0.1);
-        else if (d.type == ATR) fit(pm.ymin, pm.ymax, {&q.a}, 0.08);
-        else {
-            fit(pm.ymin, pm.ymax, {&s.v}, 0.05);
-            pm.ymin = 0;
+        pm.price = false, pm.result = idx;
+        if (res.def->has_range) {
+            pm.ymin = res.def->range_lo, pm.ymax = res.def->range_hi;
+        } else {
+            std::vector<const Vec*> ys;
+            for (size_t k = 0; k < res.def->plots.size(); ++k)
+                if (res.def->plots[k].style != PlotDef::Markers && k < res.out.plots.size()) ys.push_back(&res.out.plots[k]);
+            double lo = INFINITY, hi = -INFINITY;
+            for (const Vec* y : ys) {
+                double a, b;
+                fit(a, b, {y}, 0.0);
+                if (a != 0 || b != 1) lo = std::min(lo, a), hi = std::max(hi, b);
+            }
+            if (!std::isfinite(lo)) lo = 0, hi = 1;
+            if (res.def->zero_based) lo = std::min(lo, 0.0);
+            double pad = std::max((hi - lo) * 0.08, 1e-9);
+            pm.ymin = res.def->zero_based && lo == 0 ? 0 : lo - pad, pm.ymax = hi + pad;
         }
-        M.panes.push_back(std::move(pm));
+        M.panes.push_back(pm);
     }
-    if (C.node) BK_node_invalidate(C.node);
+    // Redraw only when something drawn changed: the chart is the most expensive thing to paint, and frames
+    // also run for the panels (scrolling the sidebar must not repaint it).
+    std::vector<double> sig = {static_cast<double>(g.cursor), static_cast<double>(g.tf_idx), g.xmin, g.xmax,
+                               price.ymin, price.ymax, static_cast<double>(g.s_version), static_cast<double>(g_scripts.generation()),
+                               static_cast<double>(g.hide_dates), static_cast<double>(g.sessions), static_cast<double>(g.broker.pos),
+                               g.broker.avg, static_cast<double>(g.broker.fills.size())};
+    for (const Order& o : g.broker.orders) sig.push_back(o.id), sig.push_back(o.price);
+    for (const Ind& d : g.inds) {
+        sig.push_back(d.uid), sig.push_back(d.on), sig.push_back(d.col.r), sig.push_back(d.col.g), sig.push_back(d.col.b);
+        sig.insert(sig.end(), d.params.begin(), d.params.end());
+    }
+    for (const PaneModel& pm : M.panes) sig.push_back(pm.ymin), sig.push_back(pm.ymax);
+    static std::vector<double> last_sig;
+    if (sig != last_sig) {
+        last_sig = std::move(sig);
+        if (C.node) BK_node_invalidate(C.node);
+    }
     equity_size();
-    if (g_equity) BK_node_invalidate(g_equity);
+    static size_t last_trips = SIZE_MAX;
+    if (g_equity && g.broker.trips.size() != last_trips) last_trips = g.broker.trips.size(), BK_node_invalidate(g_equity);
 }
 
 // The equity curve's natural height is in raster pixels, so it is set again when the UI scale changes (Retina).
@@ -832,4 +921,19 @@ BKNode* equity_new() {
     g_equity = BK_node_new("custom");
     equity_size();
     return g_equity;
+}
+
+static BKNode* g_bt_curve = nullptr;
+
+BKNode* backtest_curve_new() {
+    g_bt_curve = BK_node_new("custom");
+    static BKCustomClass cls{};
+    cls.draw = bt_curve_draw;
+    cls.natural_h = static_cast<int>(4.5 * std::max(1, BK_unit()));
+    BK_custom_set(g_bt_curve, &cls, nullptr);
+    return g_bt_curve;
+}
+
+void backtest_curve_changed() {
+    if (g_bt_curve) BK_node_invalidate(g_bt_curve);
 }

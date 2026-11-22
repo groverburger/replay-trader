@@ -30,10 +30,38 @@ set(BUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
 set(BUI_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
 set(BUI_BUILD_IMGUI OFF CACHE BOOL "" FORCE)
 set(BUI_BUILD_LUA_BINDINGS OFF CACHE BOOL "" FORCE)
-FetchContent_Declare(bui GIT_REPOSITORY https://github.com/ppmpreetham/BUI.git GIT_TAG v0.5.0 GIT_SHALLOW TRUE)
+# packaging/bui/precise-scroll.patch: trackpads scroll by exact pixels (BUI v0.5.0 rounds them to wheel notches)
+FetchContent_Declare(bui GIT_REPOSITORY https://github.com/ppmpreetham/BUI.git GIT_TAG v0.5.0 GIT_SHALLOW TRUE
+  PATCH_COMMAND ${CMAKE_COMMAND} -DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/packaging/bui/precise-scroll.patch
+                -P ${CMAKE_CURRENT_SOURCE_DIR}/packaging/bui/apply_patch.cmake)
 FetchContent_MakeAvailable(bui)
 
+# Lua 5.4 for indicator and strategy scripts
+FetchContent_Declare(lua URL https://www.lua.org/ftp/lua-5.4.7.tar.gz
+  URL_HASH SHA256=9fbf5e28ef86c69858f6d3d34eccc32e911c1a28b4120ff3e84aaa70cfbf1e30)
+FetchContent_MakeAvailable(lua)
+file(GLOB LUA_SOURCES ${lua_SOURCE_DIR}/src/*.c)
+list(FILTER LUA_SOURCES EXCLUDE REGEX "/(lua|luac)\\.c$")
+add_library(lua_static STATIC ${LUA_SOURCES})
+target_include_directories(lua_static PUBLIC ${lua_SOURCE_DIR}/src)
+if(UNIX)
+  target_compile_definitions(lua_static PRIVATE LUA_USE_POSIX)
+endif()
+
+# Built-in scripts and the scripting reference, compiled in (src/embedded_files.h)
+file(GLOB_RECURSE RT_SCRIPTS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/*.lua)
+set(RT_EMBEDDED ${CMAKE_CURRENT_BINARY_DIR}/embedded_files.cpp)
+add_custom_command(OUTPUT ${RT_EMBEDDED}
+  COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/scripts -DOUT=${RT_EMBEDDED}
+          "-DEXTRA=README.md=${CMAKE_CURRENT_SOURCE_DIR}/docs/SCRIPTING.md"
+          -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_files.cmake
+  DEPENDS ${RT_SCRIPTS} ${CMAKE_CURRENT_SOURCE_DIR}/docs/SCRIPTING.md ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_files.cmake
+  COMMENT "Embedding scripts")
+
 set(RT_SOURCES
+  ${RT_EMBEDDED}
+  src/script.cpp
+  src/strategy.cpp
   src/main.cpp
   src/panels.cpp
   src/setup.cpp
@@ -63,6 +91,8 @@ else()
   add_executable(replay_trader ${RT_SOURCES})
 endif()
 
+target_include_directories(replay_trader PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+
 if(NOT RT_DIST)  # the developer's chart font, if it's on this machine (it isn't redistributable)
   set(RT_FONT_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../strategy_report/pdf_src/fonts/BerkeleyMono-Regular.ttf")
   if(EXISTS ${RT_FONT_FILE})
@@ -71,11 +101,11 @@ if(NOT RT_DIST)  # the developer's chart font, if it's on this machine (it isn't
 endif()
 
 if(WIN32)
-  target_link_libraries(replay_trader PRIVATE bui::kit winhttp)
+  target_link_libraries(replay_trader PRIVATE bui::kit lua_static winhttp shell32)
   if(MINGW)  # no libstdc++/libgcc/winpthread DLLs to ship
     target_link_options(replay_trader PRIVATE -static -static-libgcc -static-libstdc++ $<$<BOOL:${RT_DIST}>:-s>)
   endif()
 else()
   find_package(CURL REQUIRED)  # part of macOS; libcurl4-openssl-dev on Debian/Ubuntu
-  target_link_libraries(replay_trader PRIVATE bui::kit CURL::libcurl)
+  target_link_libraries(replay_trader PRIVATE bui::kit lua_static CURL::libcurl)
 endif()

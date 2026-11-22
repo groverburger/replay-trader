@@ -6,7 +6,10 @@
 #include <cmath>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
+#include <filesystem>
 #include <functional>
+#include <map>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -14,6 +17,8 @@
 #include "BUI_kit.h"
 #include "app.h"
 #include "chart.h"
+#include "civil.h"
+#include "datafeed.h"
 #include "ui.h"
 
 namespace {
@@ -167,7 +172,13 @@ struct {
     // position
     BKNode *pos, *open, *closed, *total, *fees, *orders;
     // indicators
-    BKNode *inds, *add_type;
+    BKNode *inds, *add_row;
+    int inds_gen = -1;
+    // strategy
+    BKNode *strat_row, *strat_choice = nullptr, *strat_desc, *strat_params, *strat_auto, *strat_status, *bt_from, *bt_to, *bt_run, *bt_stop,
+        *bt_bar, *bt_summary, *bt_export;
+    int strat_gen = -1, bt_seen = -1;
+    std::string strat_sig;
     // trades
     BKNode *stats, *trips, *log;
     int unit = 0;
@@ -175,7 +186,42 @@ struct {
     std::string orders_sig, inds_sig = "-", trips_sig, log_sig;
 } W;
 
-int g_add_type = 0;
+int g_add_index = 0;  // in the Add dropdown (indicator scripts by name)
+
+// Number / checkbox / dropdown widgets for a script's params, two to a row; `get` finds the live values
+// (they may move or vanish while the widgets exist).
+void param_widgets(BKNode* parent, const ScriptDef& d, std::function<Params*()> get) {
+    BKNode* r = nullptr;
+    int in_row = 0;
+    for (size_t k = 0; k < d.params.size(); ++k) {
+        const ParamDef& q = d.params[k];
+        Params* p = get();
+        double v = p && k < p->size() ? (*p)[k] : q.def;
+        if (q.kind == ParamDef::Bool) {
+            check(parent, q.label.c_str(), v != 0, [get, k](bool on) {
+                if (Params* p = get(); p && k < p->size()) (*p)[k] = on;
+            });
+            continue;
+        }
+        if (!r || in_row == 2) r = row(parent), in_row = 0;
+        ++in_row;
+        if (q.kind == ParamDef::Choice) {
+            static std::map<const ScriptDef*, std::vector<std::vector<const char*>>> items;  // stable c-strings
+            auto& per = items[&d];
+            per.resize(d.params.size());
+            per[k].clear();
+            for (const std::string& o : q.options) per[k].push_back(o.c_str());
+            BKNode* c = choice(r, "dropdown", per[k].data(), static_cast<int>(per[k].size()), static_cast<int>(v), [get, k](int i) {
+                if (Params* p = get(); p && k < p->size()) (*p)[k] = i;
+            });
+            BK_set_str(c, "label", q.label.c_str());
+        } else {
+            number(r, q.label.c_str(), v, q.min, q.max, q.step, q.precision, [get, k](double x) {
+                if (Params* p = get(); p && k < p->size()) (*p)[k] = x;
+            });
+        }
+    }
+}
 
 void build_replay(BKNode* body) {
     BKNode* r = row(body);
@@ -277,12 +323,203 @@ void build_position(BKNode* body) {
 }
 
 void build_indicators(BKNode* body) {
-    BKNode* r = row(body);
-    choice(r, "dropdown", kIndNames, IND_COUNT, 0, [](int v) { g_add_type = v; });
-    BKNode* b = button(r, "Add", "ADD", [] { g.inds.push_back(make_ind(g_add_type, g.next_uid++)); });
-    BK_set_num(b, "weight", 0.4);
+    W.add_row = row(body);
     W.inds = add(body, "column");
     BK_set_num(W.inds, "spacing", 4);
+    BKNode* r = row(body);
+    button(r, "Scripts folder", "FILE_FOLDER", [] { open_scripts_folder(); });
+    button(r, "Reload scripts", "FILE_REFRESH", [] {
+        g_scripts.reload();
+        g.status = "scripts reloaded";
+    });
+    dim_label(body, "Indicators are Lua scripts: add your own to the scripts folder.");
+}
+
+void rebuild_add_row() {
+    clear(W.add_row);
+    static std::vector<std::string> names;
+    static std::vector<const char*> items;
+    static std::vector<std::string> ids;
+    names.clear(), items.clear(), ids.clear();
+    for (const ScriptDef* d : g_scripts.list(false)) {
+        names.push_back(d->error.empty() ? d->name : d->id + " (error)");
+        ids.push_back(d->id);
+    }
+    for (auto& n : names) items.push_back(n.c_str());
+    if (items.empty()) {
+        dim_label(W.add_row, "No indicator scripts.");
+        return;
+    }
+    g_add_index = std::min(g_add_index, static_cast<int>(items.size()) - 1);
+    choice(W.add_row, "dropdown", items.data(), static_cast<int>(items.size()), g_add_index, [](int v) { g_add_index = v; });
+    BKNode* b = button(W.add_row, "Add", "ADD", [] {
+        if (g_add_index < static_cast<int>(ids.size())) g.inds.push_back(make_ind(ids[g_add_index], g.next_uid++));
+    });
+    BK_set_num(b, "weight", 0.4);
+}
+
+void build_strategy(BKNode* body) {
+    W.strat_row = row(body);
+    W.strat_desc = dim_label(body, "");
+    W.strat_params = add(body, "column");
+    W.strat_auto = check(body, "Auto-trade the replay", false, [](bool on) {
+        if (on) start_strategy();
+        else stop_strategy();
+    });
+    W.strat_status = dim_label(body, "");
+    add(body, "separator");
+    BKNode* r = row(body);
+    W.bt_from = add(r, "text");
+    BK_set_str(W.bt_from, "label", "From");
+    BK_set_str(W.bt_from, "placeholder", "YYYY-MM-DD");
+    W.bt_to = add(r, "text");
+    BK_set_str(W.bt_to, "label", "To");
+    BK_set_str(W.bt_to, "placeholder", "YYYY-MM-DD");
+    if (g.m.size()) {  // default: from the start of last year to the end of the data
+        int64_t last = g.m.t.back();
+        std::string to = fmt_time(last, "%Y-%m-%d"), from = std::to_string(std::stoi(to.substr(0, 4)) - 1) + "-01-01";
+        BK_set_str(W.bt_from, "value", from.c_str());
+        BK_set_str(W.bt_to, "value", to.c_str());
+    }
+    r = row(body);
+    W.bt_run = button(r, "Run backtest", "PLAY", [] {
+        const ScriptDef* d = g_scripts.find(true, g.strat_id);
+        int64_t from, to;
+        if (!d || !d->error.empty()) {
+            g.status = "pick a working strategy first";
+            return;
+        }
+        if (!parse_minutes(BK_get_str(W.bt_from, "value"), from) || !parse_minutes(BK_get_str(W.bt_to, "value"), to)) {
+            g.status = "backtest dates: YYYY-MM-DD";
+            return;
+        }
+        g.bt.start(*d, g.strat_params, &g.m, from, to + 1440, g.broker);  // "to" is inclusive
+    });
+    W.bt_stop = button(r, "Stop", "CANCEL", [] { g.bt.cancel(); });
+    W.bt_bar = add(body, "progress");
+    W.bt_summary = add(body, "column");
+    BK_node_add(body, backtest_curve_new(), -1);
+    r = row(body);
+    W.bt_export = button(r, "Export trades", "EXPORT", [] {
+        std::filesystem::path dir = data_dir() / "sessions";
+        std::error_code ec;
+        std::filesystem::create_directories(dir, ec);
+        std::time_t now = std::time(nullptr);
+        char name[64];
+        std::strftime(name, sizeof name, "backtest_%Y%m%d_%H%M%S.csv", std::localtime(&now));
+        g.status = export_trips_csv(dir / name, g.bt_result.trips) ? "saved " + (dir / name).string() : "could not save the CSV";
+    });
+    button(r, "Scripts folder", "FILE_FOLDER", [] { open_scripts_folder(); });
+}
+
+std::string money_k(double v) {  // $12,345
+    char buf[32];
+    std::snprintf(buf, sizeof buf, "%s$%.0f", v < 0 ? "-" : "", std::fabs(v));
+    std::string s = buf;
+    size_t start = v < 0 ? 2 : 1;
+    for (int i = static_cast<int>(s.size()) - 3; i > static_cast<int>(start); i -= 3) s.insert(static_cast<size_t>(i), ",");
+    return s;
+}
+
+void rebuild_strategy() {
+    clear(W.strat_row);
+    W.strat_choice = nullptr;
+    static std::vector<std::string> names, ids;
+    static std::vector<const char*> items;
+    names.clear(), ids.clear(), items.clear();
+    for (const ScriptDef* d : g_scripts.list(true)) {
+        names.push_back(d->error.empty() ? d->name : d->id + " (error)");
+        ids.push_back(d->id);
+    }
+    for (auto& n : names) items.push_back(n.c_str());
+    if (ids.empty()) {
+        dim_label(W.strat_row, "No strategy scripts.");
+        return;
+    }
+    if (g.strat_id.empty() || !g_scripts.find(true, g.strat_id)) select_strategy(ids[0]);
+    int sel = static_cast<int>(std::find(ids.begin(), ids.end(), g.strat_id) - ids.begin());
+    BKNode* c = choice(W.strat_row, "dropdown", items.data(), static_cast<int>(items.size()), sel, [](int v) {
+        if (v < static_cast<int>(ids.size())) select_strategy(ids[v]);
+    });
+    BK_set_str(c, "label", "Strategy");
+    W.strat_choice = c;
+}
+
+int strategy_index() {  // the selected strategy's position in the dropdown
+    auto list = g_scripts.list(true);
+    for (size_t k = 0; k < list.size(); ++k)
+        if (list[k]->id == g.strat_id) return static_cast<int>(k);
+    return 0;
+}
+
+void rebuild_strategy_params() {
+    clear(W.strat_params);
+    const ScriptDef* d = g_scripts.find(true, g.strat_id);
+    if (!d) return;
+    if (!d->error.empty()) {
+        set_color(label(W.strat_params, d->error.substr(0, d->error.find('\n'))), kSell);
+        return;
+    }
+    if (g.strat_params.size() != d->params.size()) g.strat_params = default_params(*d);
+    param_widgets(W.strat_params, *d, [] { return &g.strat_params; });
+}
+
+void sync_strategy() {
+    std::string sig = g.strat_id + "|" + std::to_string(g_scripts.generation());
+    if (W.strat_gen != g_scripts.generation()) {
+        W.strat_gen = g_scripts.generation();
+        rebuild_strategy();
+        if (g.auto_trade) start_strategy();  // the script changed: restart it with the new code
+    }
+    if (sig != W.strat_sig) {
+        W.strat_sig = sig;
+        rebuild_strategy_params();
+        const ScriptDef* d = g_scripts.find(true, g.strat_id);
+        std::string desc = d ? d->description : "";
+        if (d && d->timeframe > 1) desc = std::to_string(d->timeframe) + "-minute bars. " + desc;
+        set_text(W.strat_desc, desc);
+    }
+    if (W.strat_choice) set_value(W.strat_choice, strategy_index());
+    set_value(W.strat_auto, g.auto_trade);
+    std::string st = g.auto_trade ? "Trading the replay on the paper account above."
+                   : !g.strat.error().empty() ? "Stopped: " + g.strat.error().substr(0, g.strat.error().find('\n')) : "";
+    set_text(W.strat_status, st);
+    bool busy = g.bt.running();
+    set_enabled(W.bt_run, !busy);
+    set_enabled(W.bt_stop, busy);
+    double f = busy ? g.bt.progress() : (g.bt_result.trips.empty() && g.bt_result.error.empty() ? 0.0 : 1.0);
+    if (BK_get_num(W.bt_bar, "factor") != f) BK_set_num(W.bt_bar, "factor", f);
+    set_enabled(W.bt_export, !g.bt_result.trips.empty());
+    if (W.bt_seen == g.bt_seen) return;
+    W.bt_seen = g.bt_seen;
+    clear(W.bt_summary);
+    const BacktestResult& r = g.bt_result;
+    backtest_curve_changed();
+    if (g.bt_seen == 0) return;
+    if (!r.error.empty()) set_color(label(W.bt_summary, r.error.substr(0, r.error.find('\n'))), kSell);
+    if (r.trips.empty() && r.error.empty()) dim_label(W.bt_summary, "No trades.");
+    if (r.trips.empty()) return;
+    const BacktestStats& s = r.stats;
+    char buf[160];
+    label(W.bt_summary, r.params);
+    BKNode* net = label(W.bt_summary, "");
+    std::snprintf(buf, sizeof buf, "Net %s   %d trades   win %.0f%%   PF %.2f", money_k(s.net).c_str(), s.trades,
+                  100.0 * s.wins / std::max(1, s.trades), s.gross_loss > 0 ? s.gross_win / s.gross_loss : 0.0);
+    set_text(net, buf);
+    set_color(net, s.net >= 0 ? kBuy : kSell);
+    int losses = s.trades - s.wins;
+    std::snprintf(buf, sizeof buf, "Avg win %s   avg loss %s   %s / trade", money_k(s.wins ? s.gross_win / s.wins : 0).c_str(),
+                  money_k(losses ? -s.gross_loss / losses : 0).c_str(), money_k(s.net / std::max(1, s.trades)).c_str());
+    label(W.bt_summary, buf);
+    std::snprintf(buf, sizeof buf, "Max drawdown %s   Sharpe %.2f (daily)   days up %.0f%%", money_k(s.max_dd).c_str(), s.sharpe,
+                  s.pct_days_up);
+    label(W.bt_summary, buf);
+    std::snprintf(buf, sizeof buf, "Best %s   worst %s   longest losing run %d", money_k(s.largest_win).c_str(),
+                  money_k(s.largest_loss).c_str(), s.max_consec_losses);
+    label(W.bt_summary, buf);
+    std::snprintf(buf, sizeof buf, "Avg hold %.0f min   fees %s   %s to %s, %d sessions", s.avg_minutes, money_k(s.fees).c_str(),
+                  fmt_time(r.from, "%Y-%m-%d").c_str(), fmt_time(r.to, "%Y-%m-%d").c_str(), s.days);
+    dim_label(W.bt_summary, buf);
 }
 
 void build_trades(BKNode* body) {
@@ -315,7 +552,10 @@ void rebuild_indicators() {
         int uid = d.uid;
         BKNode* box = add(W.inds, "box");
         BKNode* top = row(box);
-        check(top, kIndNames[d.type], d.on, [uid](bool v) {
+        const ScriptDef* def = d.def();
+        static std::map<int, std::string> titles;  // stable strings for the checkbox labels
+        titles[uid] = def ? def->name : d.script + " (missing)";
+        check(top, titles[uid].c_str(), d.on, [uid](bool v) {
             if (Ind* p = find_ind(uid)) p->on = v;
         });
         BKNode* sw = add(top, "swatch");
@@ -333,39 +573,17 @@ void rebuild_indicators() {
         });
         BK_set_num(x, "weight", 0);
         BK_set_num(x, "emboss", 0);
-
-        auto param = [&](BKNode* parent, const char* name, int Ind::*field, int lo, int hi) {
-            number(parent, name, d.*field, lo, hi, 1, 0, [uid, field](double v) {
-                if (Ind* p = find_ind(uid)) p->*field = static_cast<int>(v);
-            });
-        };
-        BKNode* r = row(box);
-        switch (d.type) {
-            case SMA: case EMA: case RSI: case ATR: param(r, "Period", &Ind::a, 2, 500); break;
-            case BOLL:
-                param(r, "Period", &Ind::a, 2, 500);
-                number(r, "Std dev", d.k, 0.5, 4.0, 0.1, 1, [uid](double v) {
-                    if (Ind* p = find_ind(uid)) p->k = static_cast<float>(v);
-                });
-                break;
-            case PIVOTS:
-                param(r, "Left", &Ind::a, 1, 50);
-                param(r, "Right", &Ind::b, 1, 50);
-                check(r, "Levels", d.c != 0, [uid](bool v) {
-                    if (Ind* p = find_ind(uid)) p->c = v;
-                });
-                break;
-            case MACD:
-                param(r, "Fast", &Ind::a, 2, 100);
-                param(r, "Slow", &Ind::b, 3, 200);
-                param(r, "Signal", &Ind::c, 2, 100);
-                break;
-            default:
-                forget(r);
-                BK_node_remove(box, r);
-                BK_node_free(r);
-                break;
+        if (!def) continue;
+        if (!def->error.empty()) {
+            set_color(label(box, def->error.substr(0, def->error.find('\n'))), kSell);
+            continue;
         }
+        if (d.params.size() != def->params.size())  // the script's params changed: start from its defaults
+            if (Ind* p = find_ind(uid)) p->params = default_params(*def);
+        param_widgets(box, *def, [uid]() -> Params* {
+            Ind* p = find_ind(uid);
+            return p ? &p->params : nullptr;
+        });
     }
 }
 
@@ -456,6 +674,7 @@ BKNode* panels_new() {
     build_position(panel(W.col, "Position & Orders"));
     build_indicators(panel(W.col, "Indicators"));
     build_trades(panel(W.col, "Trades"));
+    build_strategy(panel(W.col, "Strategy (Lua)"));
     W.log = add(W.col, "column");
     return W.scroll;
 }
@@ -498,6 +717,11 @@ void panels_sync() {
     set_text(W.fees, buf);
     sync_orders();
     // indicators
+    if (W.inds_gen != g_scripts.generation()) {  // scripts reloaded: new list, maybe new params
+        W.inds_gen = g_scripts.generation();
+        rebuild_add_row();
+        W.inds_sig = "-";
+    }
     std::string sig;
     for (const Ind& d : g.inds) sig += std::to_string(d.uid) + ",";
     if (sig != W.inds_sig) {  // starts as "-" so the first sync builds the list
@@ -505,6 +729,7 @@ void panels_sync() {
         rebuild_indicators();
     }
     sync_trades();
+    sync_strategy();
     sync_log();
 }
 

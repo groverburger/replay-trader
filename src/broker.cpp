@@ -38,7 +38,7 @@ void Broker::fill(const Order& o, double price, int64_t time, const char* why) {
     int qty = o.qty;
     if (o.reduce_only) qty = std::min(qty, pos * -o.side > 0 ? std::abs(pos) : 0);
     if (qty <= 0) return;
-    fills.push_back({time, o.side, qty, price, why});
+    fills.push_back({time, o.side, qty, price, why, o.reduce_only});
     double fee = commission * qty;
     fees += fee;
     int signed_qty = o.side * qty;
