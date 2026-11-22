@@ -1,0 +1,3 @@
+# LF everywhere, also on Windows checkouts: packaging/bui/*.patch must match BUI's sources byte for byte
+* text=auto eol=lf
+*.png binary
