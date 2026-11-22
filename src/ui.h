@@ -22,7 +22,7 @@ struct ScrollEvent {
     bool notch;
 };
 std::vector<ScrollEvent>& frame_scroll();
-constexpr float kNotch = 40.0f;  // one wheel click scrolls this many points (as BUI's 2 widget units)
+constexpr float kNotch = 40.0f;  // one wheel click scrolls this many points
 
 // Interface scale (1 on macOS, where ImGui works in points; the monitor's DPI scale on Windows) and device
 // pixels per interface unit (2 on Retina). snap() rounds a coordinate to the nearest device pixel.

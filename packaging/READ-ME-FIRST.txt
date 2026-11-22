@@ -37,5 +37,5 @@ Cmd/Ctrl+click on the chart places a limit order, Shift+click a stop; drag order
 
 License
 -------
-GPL-3.0-or-later. Its source is included as replay_trader-source.zip. It uses Dear ImGui (MIT), GLFW (zlib),
-Lua (MIT) and the Inter font (SIL Open Font License 1.1, https://github.com/rsms/inter).
+MIT (LICENSE.txt). It includes Dear ImGui (MIT), GLFW (zlib), Lua (MIT) and the Inter font (SIL Open Font
+License 1.1); their license texts are in THIRD_PARTY_NOTICES.txt. Source: https://github.com/groverburger/replay-trader

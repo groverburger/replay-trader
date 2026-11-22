@@ -397,7 +397,6 @@ int render_screenshot(const char* shot) {
     int W = 1600, H = 950;
     if (const char* sz = std::getenv("RT_SHOT_SIZE")) std::sscanf(sz, "%dx%d", &W, &H);  // e.g. 850x500
     const char* env = std::getenv("RT_UI_SCALE");
-    if (!env) env = std::getenv("BUI_UI_SCALE");  // the name the BUI version used
     g_px_scale = std::clamp(env ? static_cast<float>(std::atof(env)) : 1.0f, 0.5f, 4.0f), g_ui_scale = 1;
     ImGuiIO& io = ImGui::GetIO();
     io.DisplaySize = ImVec2(W, H);

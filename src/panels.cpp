@@ -297,7 +297,7 @@ void param_widgets(const ScriptDef& d, Params& p) {
         const ParamDef& q = d.params[k];
         ImGui::PushID(static_cast<int>(k));
         if (q.kind == ParamDef::Bool) {
-            if (in_row == 1) ImGui::SameLine();  // beside a lone number, as BUI's row
+            if (in_row == 1) ImGui::SameLine();  // beside a lone number
             bool on = p[k] != 0;
             if (ImGui::Checkbox(q.label.c_str(), &on)) p[k] = on;
             in_row = 0;

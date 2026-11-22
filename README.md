@@ -89,8 +89,8 @@ fill against the next revealed minute:
 
 When a bracket's stop and target are both hit inside one minute, it counts as stopped out.
 
-Times are New York time. Number fields work like Blender's: drag one to scrub it, or click it and type a value or
-an expression such as `20*1.5` (Enter applies, Esc cancels).
+Times are New York time. Drag a number field to scrub it, or click it and type a value or an expression such as
+`20*1.5` (Enter applies, Esc cancels).
 
 **Command line (optional).** Options are `--api-key KEY` (or set `NQ_API_KEY`), `--offline` to use the
 downloaded data without connecting, `--start "2025-04-09 09:25"` and `--demo`.
@@ -146,7 +146,8 @@ one. Pushing a tag such as `v1.0.0` builds both on GitHub Actions and attaches t
 
 ## License
 
-GPL-3.0-or-later (see [LICENSE](LICENSE)). It uses Dear ImGui (MIT), GLFW (zlib), Lua (MIT) and the Inter font
-(SIL Open Font License 1.1).
+MIT (see [LICENSE](LICENSE)). It includes Dear ImGui (MIT), GLFW (zlib), Lua (MIT) and the Inter font (SIL Open
+Font License 1.1); their license texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which also ships
+in every release zip.
 
 This is a practice tool, not investment advice. Past market data says nothing reliable about future results.

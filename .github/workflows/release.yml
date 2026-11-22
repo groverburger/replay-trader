@@ -31,7 +31,8 @@ jobs:
           mkdir -p stage
           ditto "$APP" "stage/Replay Trader.app"
           cp packaging/READ-ME-FIRST.txt stage/
-          git archive --format=zip --prefix=replay-trader-source/ -o stage/replay-trader-source.zip HEAD
+          cp LICENSE stage/LICENSE.txt
+          cp THIRD_PARTY_NOTICES.md stage/THIRD_PARTY_NOTICES.txt
           (cd stage && zip -qry ../Replay-Trader-macOS.zip .)
       - uses: actions/upload-artifact@v4
         with:
@@ -76,7 +77,8 @@ jobs:
         run: |
           mkdir -p stage
           cp build/ReplayTrader.exe packaging/READ-ME-FIRST.txt stage/
-          git archive --format=zip --prefix=replay-trader-source/ -o stage/replay-trader-source.zip HEAD
+          cp LICENSE stage/LICENSE.txt
+          cp THIRD_PARTY_NOTICES.md stage/THIRD_PARTY_NOTICES.txt
           (cd stage && zip -qr ../Replay-Trader-Windows.zip .)
       - uses: actions/upload-artifact@v4
         with:
