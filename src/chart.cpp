@@ -554,15 +554,35 @@ const Order* order_near(const Layout& L, const Pane& pn, float y) {
     return best;
 }
 
+constexpr double kMinSpan = 10, kMaxSpan = 20000;  // bars in view (refresh_series keeps 60,000 buckets loaded)
+constexpr double kZoomStep = 0.93;                 // per wheel notch; a trackpad sends many small notches
+constexpr double kPanStep = 0.03;                  // fraction of the view per sideways notch
+
+// Keeps a scrolled-back view on the data: at most half the view before the first bar or after the cursor, and
+// never further back than the bars refresh_series loads.
+void clamp_view() {
+    double span = g.xmax - g.xmin;
+    double cur = static_cast<double>(g.agg().bucket_of(g.cursor));
+    double lo = std::max(-0.5 * span, cur - 60000 + 1), hi = cur - 0.5 * span;
+    g.xmin = std::clamp(g.xmin, lo, std::max(lo, hi));
+    g.xmax = g.xmin + span;
+}
+
 void zoom(const Layout& L, double factor, float anchor_px) {
-    double span = std::clamp((g.xmax - g.xmin) * factor, 10.0, 20000.0);
-    if (g.follow) {
-        g.visible = static_cast<int>(span);
-        return;
-    }
-    double ax = L.xval(anchor_px), t = (ax - g.xmin) / (g.xmax - g.xmin);
+    // following, xmin/xmax are only recomputed next frame: several notches in one frame must compound
+    double base = g.follow ? g.visible : g.xmax - g.xmin;
+    double span = std::clamp(base * factor, kMinSpan, kMaxSpan);
+    g.visible = static_cast<int>(std::lround(span));
+    if (g.follow) return;  // following: the right edge stays on the latest bar (update_view)
+    double ax = L.xval(anchor_px), t = (ax - g.xmin) / (g.xmax - g.xmin);  // keep the bar under the pointer
     g.xmin = ax - t * span, g.xmax = g.xmin + span;
-    g.visible = static_cast<int>(span);
+    clamp_view();
+}
+
+void pan(double bars) {
+    g.follow = false;
+    g.xmin += bars, g.xmax += bars;
+    clamp_view();
 }
 
 int chart_event(void*, BKNode* node, const BKCustomEvent* e) {
@@ -595,6 +615,7 @@ int chart_event(void*, BKNode* node, const BKCustomEvent* e) {
                 if (g.follow && std::fabs(e->x - C.press_x) < 3) break;
                 g.follow = false;
                 g.xmin = C.xmin0 - dx, g.xmax = C.xmax0 - dx;
+                clamp_view();
             }
             {
                 int cur = BK_CURSOR_CROSSHAIR;
@@ -606,15 +627,15 @@ int chart_event(void*, BKNode* node, const BKCustomEvent* e) {
             }
             break;
         case BK_CUSTOM_LEAVE: C.hover = false; break;
-        case BK_CUSTOM_WHEEL:
-            if (std::fabs(e->wheel_x) > std::fabs(e->wheel_y)) {
-                double span = g.xmax - g.xmin, dx = -e->wheel_x * span * 0.04;
-                g.follow = false;
-                g.xmin += dx, g.xmax += dx;
-            } else {
-                zoom(L, std::pow(0.9, e->wheel_y), e->x);
-            }
+        case BK_CUSTOM_WHEEL: {
+            // Vertical scrolling zooms, sideways scrolling pans. The macOS host turns trackpad scrolling into
+            // whole notches and sends a sideways swipe as Shift + vertical notches, so Shift means sideways.
+            double h = e->wheel_x, v = e->wheel_y;
+            if ((e->mods & BK_SHIFT) && h == 0) h = v, v = 0;
+            if (h != 0) pan(-h * kPanStep * (g.xmax - g.xmin));
+            if (v != 0) zoom(L, std::pow(kZoomStep, v), e->x);
             break;
+        }
         case BK_CUSTOM_KEY:
             if (!e->keysym || !hotkey(e->keysym, e->mods & (BK_SHIFT | BK_CTRL | BK_ALT))) return 0;
             break;

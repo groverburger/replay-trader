@@ -217,7 +217,7 @@ void build_replay(BKNode* body) {
         g.follow = true;
     });
     r = row(body);
-    W.visible = number(r, "Bars in view", g.visible, 20, 1000, 1, 0, [](double v) {
+    W.visible = number(r, "Bars in view", g.visible, 10, 20000, 1, 0, [](double v) {
         g.visible = static_cast<int>(v);
         if (!g.follow) g.xmin = g.xmax - g.visible;
     });

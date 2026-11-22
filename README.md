@@ -63,7 +63,7 @@ Delete that folder to remove everything.
 
 The **Random day** button starts a new session at 09:25 New York time on a random day. To start at a specific
 moment, type a date and time into the field and press **Start here**. "Skip overnight" plays straight from the
-close to the next open. Drag the chart to look back, and scroll to zoom.
+close to the next open. Scroll to zoom. Drag the chart, swipe sideways on a trackpad or Shift+scroll to look back, and press L to catch up again.
 
 **Trading**
 
