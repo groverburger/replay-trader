@@ -1,10 +1,12 @@
-// Chart drawing and interaction, replacing ImPlot: panes, axes, candles, indicators, trading overlays, hover
-// tooltip, pan and zoom, order placement and dragging. Everything is in raster pixels.
+// Chart drawing and interaction: panes, axes, candles, indicators, trading overlays, hover tooltip, pan and
+// zoom, order placement and dragging, drawn with ImGui draw lists. Coordinates are interface units relative to
+// the chart's top-left corner; L.s is the interface scale and L.hair one device pixel.
 
 #include "chart.h"
 #include "datafeed.h"
 
 #include <algorithm>
+#include <cfloat>
 #include <climits>
 #include <map>
 #include <cmath>
@@ -13,15 +15,16 @@
 #include <string>
 #include <vector>
 
-#include "BUI_kit.h"
-#include "GPU_raster.h"
+#include "imgui.h"
+#include "imgui_internal.h"
 #include "app.h"
 #include "script.h"
 #include "ui.h"
 
 namespace {
 
-const char* g_family = nullptr;  // chart font family, nullptr = the UI font
+ImFont* g_font = nullptr;        // axis labels, legend, tags (nullptr: the UI font)
+ImFont* g_font_title = nullptr;  // the "NQ 5m" title
 
 struct Box {
     float x0 = 0, y0 = 0, x1 = 0, y1 = 0;
@@ -30,21 +33,32 @@ struct Box {
     float h() const { return y1 - y0; }
 };
 
-float ui_scale() { return BK_unit() / 20.0f; }
-
-Rgba theme(const char* key, Rgba fallback) {
-    float c[4];
-    return BK_theme_color(key, c) ? Rgba{c[0], c[1], c[2], c[3]} : fallback;
+Rgba style_color(ImGuiCol c) {
+    ImVec4 v = ImGui::GetStyleColorVec4(c);
+    return {v.x, v.y, v.z, v.w};
 }
 
-// ---------------------------------------------------------------- drawing helpers over BuiRaster
-struct Painter {
-    BuiRaster* r;
-    float ox, oy;  // node origin in the raster
+ImU32 u32(Rgba c) { return ImGui::ColorConvertFloat4ToU32(ImVec4(c.r, c.g, c.b, c.a)); }
 
+const float kFont = 11.0f;
+
+ImFont* font_for(float size) {
+    ImFont* f = size > kFont * ui_scale() * 1.05f && g_font_title ? g_font_title : g_font;
+    return f ? f : ImGui::GetFont();
+}
+
+// ---------------------------------------------------------------- drawing helpers over an ImDrawList
+struct Painter {
+    ImDrawList* dl;
+    float ox, oy;  // chart origin on screen
+
+    // Filled rectangle with its edges on device pixels (candles keep their width while the chart pans).
     void fill(float x, float y, float w, float h, Rgba c) const {
-        float col[4] = {c.r, c.g, c.b, c.a};
-        BUI_raster_fill_rect(r, ox + x, oy + y, w, h, col);
+        float x0 = snap(ox + x), y0 = snap(oy + y), x1 = snap(ox + x + w), y1 = snap(oy + y + h);
+        float px = 1.0f / px_scale();
+        if (x1 <= x0) x1 = x0 + px;
+        if (y1 <= y0) y1 = y0 + px;
+        dl->AddRectFilled(ImVec2(x0, y0), ImVec2(x1, y1), u32(c));
     }
     // Rectangle clipped to `b`.
     void rect(float x0, float y0, float x1, float y1, Rgba c, const Box& b) const {
@@ -53,7 +67,7 @@ struct Painter {
         x0 = std::max(x0, b.x0), x1 = std::min(x1, b.x1), y0 = std::max(y0, b.y0), y1 = std::min(y1, b.y1);
         if (x1 > x0 && y1 > y0) fill(x0, y0, x1 - x0, y1 - y0, c);
     }
-    // Anti-aliased line clipped to `b` (Liang-Barsky).
+    // Line of width w clipped to `b` (Liang-Barsky). Horizontal and vertical lines are pixel-aligned rectangles.
     void line(float x0, float y0, float x1, float y1, float w, Rgba c, const Box& b) const {
         float t0 = 0, t1 = 1, dx = x1 - x0, dy = y1 - y0;
         auto edge = [&](float p, float q) {
@@ -69,50 +83,66 @@ struct Painter {
             return true;
         };
         if (!edge(-dx, x0 - b.x0) || !edge(dx, b.x1 - x0) || !edge(-dy, y0 - b.y0) || !edge(dy, b.y1 - y0)) return;
-        float col[4] = {c.r, c.g, c.b, c.a};
-        BUI_raster_line(r, ox + x0 + t0 * dx, oy + y0 + t0 * dy, ox + x0 + t1 * dx, oy + y0 + t1 * dy, w, col);
+        float ax = x0 + t0 * dx, ay = y0 + t0 * dy, bx = x0 + t1 * dx, by = y0 + t1 * dy;
+        if (ay == by || ax == bx) {
+            float px = 1.0f / px_scale(), half = std::max(w, px) / 2;
+            if (ay == by) {
+                float y = snap(oy + ay - half);
+                dl->AddRectFilled(ImVec2(snap(ox + std::min(ax, bx)), y), ImVec2(snap(ox + std::max(ax, bx)), y + std::max(snap(2 * half), px)), u32(c));
+            } else {
+                float x = snap(ox + ax - half);
+                dl->AddRectFilled(ImVec2(x, snap(oy + std::min(ay, by))), ImVec2(x + std::max(snap(2 * half), px), snap(oy + std::max(ay, by))), u32(c));
+            }
+            return;
+        }
+        dl->AddLine(ImVec2(ox + ax, oy + ay), ImVec2(ox + bx, oy + by), u32(c), w);
+    }
+    // Polyline through points (local units), clipped to `b`.
+    void polyline(const std::vector<ImVec2>& pts, float w, Rgba c, const Box& b) const {
+        if (pts.size() < 2) return;
+        std::vector<ImVec2> v(pts.size());
+        for (size_t k = 0; k < pts.size(); ++k) v[k] = ImVec2(ox + pts[k].x, oy + pts[k].y);
+        dl->PushClipRect(ImVec2(ox + b.x0, oy + b.y0), ImVec2(ox + b.x1, oy + b.y1), true);
+        dl->AddPolyline(v.data(), static_cast<int>(v.size()), u32(c), ImDrawFlags_None, w);
+        dl->PopClipRect();
     }
     void dashed_v(float x, float y0, float y1, Rgba c, const Box& b, float dash, float gap) const {
-        for (float y = y0; y < y1; y += dash + gap) line(x, y, x, std::min(y + dash, y1), 1, c, b);
+        for (float y = y0; y < y1; y += dash + gap) line(x, y, x, std::min(y + dash, y1), hair(), c, b);
     }
     void dashed_h(float y, float x0, float x1, Rgba c, const Box& b, float dash, float gap) const {
-        for (float x = x0; x < x1; x += dash + gap) line(x, y, std::min(x + dash, x1), y, 1, c, b);
+        for (float x = x0; x < x1; x += dash + gap) line(x, y, std::min(x + dash, x1), y, hair(), c, b);
     }
+    static float hair() { return 1.0f / px_scale(); }
     void tri(float ax, float ay, float bx, float by, float cx, float cy, Rgba c) const {
-        float p[3][2] = {{ox + ax, oy + ay}, {ox + bx, oy + by}, {ox + cx, oy + cy}};
-        float col[4] = {c.r, c.g, c.b, c.a};
-        BUI_raster_polygon(r, p, 3, col);
+        dl->AddTriangleFilled(ImVec2(ox + ax, oy + ay), ImVec2(ox + bx, oy + by), ImVec2(ox + cx, oy + cy), u32(c));
     }
     void round_rect(float x, float y, float w, float h, float rad, Rgba c) const {
-        float col[4] = {c.r, c.g, c.b, c.a};
-        BUI_raster_round_rect(r, ox + x, oy + y, w, h, rad, col);
+        dl->AddRectFilled(ImVec2(snap(ox + x), snap(oy + y)), ImVec2(snap(ox + x + w), snap(oy + y + h)), u32(c), rad);
     }
     // `y` is the text's vertical centre.
     void text(float x, float y, const std::string& s, float size, Rgba c) const {
         if (s.empty()) return;
-        float col[4] = {c.r, c.g, c.b, c.a};
-        BUI_raster_set_font(r, g_family, 0);
-        BUI_raster_text(r, ox + x, oy + y + size * 0.36f, s.c_str(), static_cast<int>(s.size()), size, col);
-        BUI_raster_set_font(r, nullptr, 0);
+        dl->AddText(font_for(size), size, ImVec2(snap(ox + x), snap(oy + y - size * 0.55f)), u32(c), s.c_str(), s.c_str() + s.size());
     }
-    // Triangle mesh (the Bollinger fill), scissored to `b`.
-    void mesh(const std::vector<BuiMeshVertex>& v, const std::vector<uint32_t>& idx, const Box& b) const {
-        if (idx.empty()) return;
-        float clip[4] = {b.x0, b.y0, b.x1, b.y1};
-        BUI_raster_mesh(r, v.data(), static_cast<int>(v.size()), idx.data(), static_cast<int>(idx.size()),
-                        BUI_MESH_INDEX32, 0, clip, ox, oy);
+    // Quads (the band fills): four corners each, in local units, one colour; clipped to `b`.
+    void quads(const std::vector<ImVec2>& v, ImU32 col, const Box& b) const {
+        if (v.size() < 4) return;
+        dl->PushClipRect(ImVec2(ox + b.x0, oy + b.y0), ImVec2(ox + b.x1, oy + b.y1), true);
+        int nq = static_cast<int>(v.size() / 4);
+        dl->PrimReserve(nq * 6, nq * 4);
+        ImVec2 uv = dl->_Data->TexUvWhitePixel;
+        for (int q = 0; q < nq; ++q) {
+            ImDrawIdx k = static_cast<ImDrawIdx>(dl->_VtxCurrentIdx);
+            for (int t = 0; t < 4; ++t) dl->PrimWriteVtx(ImVec2(ox + v[q * 4 + t].x, oy + v[q * 4 + t].y), uv, col);
+            for (int t : {0, 1, 2, 2, 1, 3}) dl->PrimWriteIdx(static_cast<ImDrawIdx>(k + t));
+        }
+        dl->PopClipRect();
     }
 };
 
 float text_w(const std::string& s, float size) {
-    float w = 0;
-    if (!s.empty() && BUI_text_measure(g_family, 0, size, s.c_str(), static_cast<int>(s.size()), &w)) return w;
-    return size * 0.6f * s.size();
-}
-
-uint32_t pack(Rgba c) {
-    auto b = [](float v) { return static_cast<uint32_t>(std::clamp(v, 0.0f, 1.0f) * 255.0f + 0.5f); };
-    return b(c.r) | b(c.g) << 8 | b(c.b) << 16 | b(c.a) << 24;
+    if (s.empty()) return 0;
+    return font_for(size)->CalcTextSizeA(size, FLT_MAX, 0, s.c_str(), s.c_str() + s.size()).x;
 }
 
 // ---------------------------------------------------------------- model: computed once per frame in chart_prepare
@@ -225,6 +255,7 @@ std::string fmt(const char* f, double v) {
 }
 
 std::string axis_number(double v, double step) {
+    if (std::fabs(v) < step * 1e-6) v = 0;  // no "-0" from accumulated rounding
     if (std::fabs(v) >= 1e6) return fmt("%.1fM", v / 1e6);
     if (std::fabs(v) >= 1e4 && step >= 1000) return fmt("%.0fk", v / 1e3);
     return fmt(step >= 1 ? "%.0f" : step >= 0.1 ? "%.1f" : "%.2f", v);
@@ -237,7 +268,6 @@ std::string bar_time(long j, const char* f_daily_dates, const char* f_intraday_d
 
 // ---------------------------------------------------------------- chart interaction state
 struct ChartState {
-    BKNode* node = nullptr;
     bool hover = false;
     float mx = 0, my = 0;
     enum { NONE, PAN, ORDER } drag = NONE;
@@ -246,32 +276,29 @@ struct ChartState {
     double xmin0 = 0, xmax0 = 0;
 } C;
 
-const float kFont = 11.0f;
-
 // ---------------------------------------------------------------- drawing
 void draw_series_line(const Painter& P, const Layout& L, const Pane& pn, const Vec& y, Rgba c, float w) {
     long j0, j1;
     visible_range(j0, j1);
     j0 = std::max(0L, j0 - 1), j1 = std::min(static_cast<long>(y.size()) - 1, j1 + 1);
-    long step = std::max(1L, static_cast<long>(1.0 / std::max(1e-9, L.ppb())));  // about one point per pixel
-    bool have = false;
-    float px0 = 0, py0 = 0;
+    long step = std::max(1L, static_cast<long>(1.0 / std::max(1e-9, L.ppb() * px_scale())));  // about one point per device pixel
+    std::vector<ImVec2> run;
     for (long j = j0; j <= j1; j += step) {
         if (!std::isfinite(y[j])) {
-            have = false;
+            P.polyline(run, w * L.s, c, pn.box);
+            run.clear();
             continue;
         }
-        float px = L.px(static_cast<double>(g.s.x0 + j)), py = pn.py(y[j]);
-        if (have) P.line(px0, py0, px, py, w * L.s, c, pn.box);
-        px0 = px, py0 = py, have = true;
+        run.push_back(ImVec2(L.px(static_cast<double>(g.s.x0 + j)), static_cast<float>(pn.py(y[j]))));
     }
+    P.polyline(run, w * L.s, c, pn.box);
 }
 
 // Histogram bars from zero; by_bar colours each by its candle's direction (alpha from c).
 void draw_bars(const Painter& P, const Layout& L, const Pane& pn, const Vec& y, Rgba c, bool by_bar = false) {
     long j0, j1;
     visible_range(j0, j1);
-    float half = std::max(0.5f, static_cast<float>(L.ppb() * 0.35)), base = pn.py(std::clamp(0.0, pn.ymin, pn.ymax));
+    float half = std::max(0.5f / px_scale(), static_cast<float>(L.ppb() * 0.35)), base = pn.py(std::clamp(0.0, pn.ymin, pn.ymax));
     for (long j = j0; j <= j1 && j < static_cast<long>(y.size()); ++j)
         if (std::isfinite(y[j])) {
             float px = L.px(static_cast<double>(g.s.x0 + j));
@@ -300,18 +327,18 @@ void draw_candles(const Painter& P, const Layout& L, const Pane& pn) {
     visible_range(j0, j1);
     if (j1 < j0) return;
     float ppb = static_cast<float>(L.ppb());
-    if (ppb < 2.0f) {
+    if (ppb * px_scale() < 2.0f) {  // under 2 device pixels a bar: a close line
         draw_series_line(P, L, pn, s.c, {0.85f, 0.85f, 0.85f, 1}, 1.0f);
         return;
     }
-    float half = std::max(1.0f, ppb * 0.36f), wick = std::max(1.0f, std::floor(L.s));
+    float px = 1.0f / px_scale(), half = std::max(px, ppb * 0.36f), wick = std::max(px, std::floor(L.s * px_scale()) * px);
     for (long j = j0; j <= j1; ++j) {
         Rgba c = s.c[j] >= s.o[j] ? kUp : kDown;
         if (j == static_cast<long>(s.n()) - 1 && s.last_partial) c.a = 0.69f;  // forming
         float x = L.px(static_cast<double>(s.x0 + j));
         P.rect(x - wick / 2, pn.py(s.h[j]), x + wick / 2, pn.py(s.l[j]), c, pn.box);
         float top = std::min(pn.py(s.o[j]), pn.py(s.c[j])), bot = std::max(pn.py(s.o[j]), pn.py(s.c[j]));
-        if (bot - top < 1.0f) bot = top + 1.0f;
+        if (bot - top < px) bot = top + px;
         P.rect(x - half, top, x + half, bot, c, pn.box);
     }
 }
@@ -337,14 +364,14 @@ void draw_grid(const Painter& P, const Layout& L, const Pane& pn, Rgba grid, Rgb
     double step = nice_step(pn.ymax - pn.ymin, pn.box.h() / (38 * L.s));
     for (double v = std::ceil(pn.ymin / step) * step; v <= pn.ymax; v += step) {
         float y = pn.py(v);
-        P.line(pn.box.x0, y, pn.box.x1, y, 1, grid, pn.box);
+        P.line(pn.box.x0, y, pn.box.x1, y, P.hair(), grid, pn.box);
         if (y > pn.box.y0 + 6 * L.s && y < pn.box.y1 - 6 * L.s)
             P.text(L.axis_x + 6 * L.s, y, axis_number(v, step), kFont * L.s, text);
     }
     if (xticks)
         for (double x : *xticks) {
             float px = L.px(x);
-            P.line(px, pn.box.y0, px, pn.box.y1, 1, grid, pn.box);
+            P.line(px, pn.box.y0, px, pn.box.y1, P.hair(), grid, pn.box);
         }
 }
 
@@ -391,23 +418,20 @@ void draw_result(const Painter& P, const Layout& L, const Pane& pn, const IndRes
     long j0, j1;
     visible_range(j0, j1);
     if (!pn.pm->price)
-        for (double lv : r.def->levels) P.line(pn.box.x0, pn.py(lv), pn.box.x1, pn.py(lv), 1, {1, 1, 1, 0.3f}, pn.box);
+        for (double lv : r.def->levels) P.line(pn.box.x0, pn.py(lv), pn.box.x1, pn.py(lv), P.hair(), {1, 1, 1, 0.3f}, pn.box);
     for (const FillDef& f : r.def->fills) {
         const Vec &a = r.out.plots[f.a], &b = r.out.plots[f.b];
-        std::vector<BuiMeshVertex> v;
-        std::vector<uint32_t> idx;
-        uint32_t col = pack(r.plot_color(f.a).alpha(f.alpha));
+        std::vector<ImVec2> v;
+        ImU32 col = u32(r.plot_color(f.a).alpha(f.alpha));
         for (long j = std::max(0L, j0 - 1); j <= j1 && j + 1 < static_cast<long>(a.size()); ++j) {
             if (!std::isfinite(a[j]) || !std::isfinite(a[j + 1]) || !std::isfinite(b[j]) || !std::isfinite(b[j + 1])) continue;
             float xa = L.px(s.x0 + j), xb = L.px(s.x0 + j + 1);
-            uint32_t k = static_cast<uint32_t>(v.size());
-            v.push_back({xa, pn.py(a[j]), 0, 0, col});
-            v.push_back({xa, pn.py(b[j]), 0, 0, col});
-            v.push_back({xb, pn.py(a[j + 1]), 0, 0, col});
-            v.push_back({xb, pn.py(b[j + 1]), 0, 0, col});
-            for (uint32_t t : {0u, 1u, 2u, 2u, 1u, 3u}) idx.push_back(k + t);
+            v.push_back({xa, pn.py(a[j])});
+            v.push_back({xa, pn.py(b[j])});
+            v.push_back({xb, pn.py(a[j + 1])});
+            v.push_back({xb, pn.py(b[j + 1])});
         }
-        P.mesh(v, idx, pn.box);
+        P.quads(v, col, pn.box);
     }
     for (size_t k = 0; k < r.def->plots.size(); ++k) {
         const PlotDef& p = r.def->plots[k];
@@ -424,7 +448,7 @@ void draw_result(const Painter& P, const Layout& L, const Pane& pn, const IndRes
         float y = pn.py(sg.price);
         Rgba c = r.plot_color(static_cast<size_t>(sg.plot));
         c.a *= sg.alpha;
-        P.line(L.px(static_cast<double>(s.x0 + sg.i0)), y, L.px(static_cast<double>(s.x0 + sg.i1)), y, 1, c, pn.box);
+        P.line(L.px(static_cast<double>(s.x0 + sg.i0)), y, L.px(static_cast<double>(s.x0 + sg.i1)), y, P.hair(), c, pn.box);
     }
     float sz = 4 * L.s, off = 4 * L.s;
     for (const IndMarker& mk : r.out.markers) {
@@ -537,17 +561,15 @@ void draw_hover(const Painter& P, const Layout& L, Rgba text) {
     float bx = C.mx + 16 * s, by = C.my + 16 * s;
     if (bx + bw > L.plot.x1) bx = C.mx - 16 * s - bw;
     if (by + bh > L.h) by = C.my - 16 * s - bh;
-    Rgba bg = theme("tooltip.inner", {0.1f, 0.1f, 0.1f, 1});
+    Rgba bg = style_color(ImGuiCol_PopupBg);
     bg.a = 0.95f;
     P.round_rect(bx, by, bw, bh, 4 * s, bg);
     float y = by + 5 * s + lh / 2;
     for (auto& l : lines) P.text(bx + 8 * s, y, l.first, size, l.second), y += lh;
 }
 
-void chart_draw(void*, BKNode*, BuiRaster* r, const int rect[4]) {
-    Painter P{r, static_cast<float>(rect[0]), static_cast<float>(rect[1])};
-    Layout L = layout(static_cast<float>(rect[2]), static_cast<float>(rect[3]));
-    Rgba region = theme("region_bg", {0.19f, 0.19f, 0.19f, 1}), text = theme("text", {0.9f, 0.9f, 0.9f, 1});
+void draw_chart(const Painter& P, const Layout& L) {
+    Rgba region = style_color(ImGuiCol_WindowBg), text = style_color(ImGuiCol_Text);
     Rgba plot_bg{region.r * 0.72f, region.g * 0.72f, region.b * 0.72f, 1}, grid = text.alpha(0.06f);
     if (g.s.n() == 0 || M.n != g.s.n() || L.panes.empty()) {  // not prepared for this series yet
         P.fill(0, 0, L.w, L.h, region);
@@ -662,76 +684,66 @@ void pan(double bars, bool eased) {  // eased for mouse notches, immediate (1:1)
     else pan_now(bars);
 }
 
-int chart_event(void*, BKNode* node, const BKCustomEvent* e) {
-    int rc[4];
-    BK_node_rect(node, rc);
-    Layout L = layout(static_cast<float>(rc[2]), static_cast<float>(rc[3]));
-    const Pane* pn = L.pane_at(e->x, e->y);
+// Pointer input for this frame: presses, drags, hover and the wheel / trackpad. `active` is the chart's
+// invisible button holding the mouse, `hovered` the pointer over it with nothing in the way.
+void chart_input(const Layout& L, ImVec2 origin, bool hovered, bool pressed) {
+    ImGuiIO& io = ImGui::GetIO();
+    float mx = io.MousePos.x - origin.x, my = io.MousePos.y - origin.y;
+    const Pane* pn = L.pane_at(mx, my);
     const Pane* price = L.panes.empty() ? nullptr : &L.panes[0];
-    switch (e->type) {
-        case BK_CUSTOM_PRESS:
-            if (e->button != 1 || !pn) return 0;
-            if (pn->pm->price && (e->mods & (BK_CTRL | BK_SHIFT))) {  // Cmd/Ctrl+click: limit, Shift+click: stop
-                click_order(pn->value(e->y), e->mods & BK_CTRL);
-            } else if (const Order* o = pn->pm->price ? order_near(L, *pn, e->y) : nullptr) {
-                C.drag = ChartState::ORDER, C.order_id = o->id;
-            } else {
-                C.drag = ChartState::PAN, C.press_x = e->x, C.xmin0 = g.xmin, C.xmax0 = g.xmax;
-            }
-            break;
-        case BK_CUSTOM_RELEASE:
-            if (e->button == 1) C.drag = ChartState::NONE;
-            break;
-        case BK_CUSTOM_MOTION:
-            C.hover = true, C.mx = e->x, C.my = e->y;
-            if (C.drag == ChartState::ORDER && price) {
-                for (Order& o : g.broker.orders)
-                    if (o.id == C.order_id) o.price = round_tick(price->value(e->y));
-            } else if (C.drag == ChartState::PAN) {
-                double dx = (e->x - C.press_x) / L.ppb();
-                if (g.follow && std::fabs(e->x - C.press_x) < 3) break;
-                g.follow = false;
-                Z.on = false, g_pan_left = 0;
-                g.xmin = C.xmin0 - dx, g.xmax = C.xmax0 - dx;
-                clamp_view();
-            }
-            {
-                int cur = BK_CURSOR_CROSSHAIR;
-                if (C.drag == ChartState::ORDER || (C.drag == ChartState::NONE && pn && pn->pm->price && order_near(L, *pn, e->y)))
-                    cur = BK_CURSOR_NS;
-                else if (C.drag == ChartState::PAN) cur = BK_CURSOR_MOVE;
-                else if (!pn) cur = BK_CURSOR_DEFAULT;
-                BK_custom_set_cursor(node, cur);
-            }
-            break;
-        case BK_CUSTOM_LEAVE: C.hover = false; break;
-        case BK_CUSTOM_WHEEL: {
-            // Vertical scrolling zooms, sideways scrolling pans. The macOS host turns trackpad scrolling into
-            // whole notches and sends a sideways swipe as Shift + vertical notches, so Shift means sideways.
-            // A notch is one wheel click (2 widget units of scrolling); trackpads send fractions of one.
-            double h = e->wheel_x, v = e->wheel_y;
-            if ((e->mods & BK_SHIFT) && h == 0) h = v, v = 0;
-            auto whole = [](double d) { return d == std::round(d); };
-            if (h != 0) pan(-h * 2.0 * BK_unit() / L.ppb(), whole(h));  // the chart follows the fingers
-            if (v != 0) zoom(L, std::pow(kZoomStep, v), e->x, whole(v));
-            break;
+    bool ctrl = io.KeyCtrl || io.KeySuper;  // Cmd on macOS
+    if (pressed && pn) {
+        if (pn->pm->price && (ctrl || io.KeyShift)) {  // Cmd/Ctrl+click: limit, Shift+click: stop
+            click_order(pn->value(my), ctrl);
+        } else if (const Order* o = pn->pm->price ? order_near(L, *pn, my) : nullptr) {
+            C.drag = ChartState::ORDER, C.order_id = o->id;
+        } else {
+            C.drag = ChartState::PAN, C.press_x = mx, C.xmin0 = g.xmin, C.xmax0 = g.xmax;
         }
-        case BK_CUSTOM_KEY:
-            if (!e->keysym || !hotkey(e->keysym, e->mods & (BK_SHIFT | BK_CTRL | BK_ALT))) return 0;
-            break;
-        default: return 0;
     }
-    BK_node_invalidate(node);  // hover crosshair, drags: chart_prepare only sees state changes
-    poke();
-    return 1;
+    if (C.drag != ChartState::NONE && !ImGui::IsMouseDown(ImGuiMouseButton_Left)) C.drag = ChartState::NONE;
+    C.hover = hovered || C.drag != ChartState::NONE;
+    if (!C.hover) return;
+    bool moved = mx != C.mx || my != C.my;
+    C.mx = mx, C.my = my;
+    if (moved && C.drag == ChartState::ORDER && price) {
+        for (Order& o : g.broker.orders)
+            if (o.id == C.order_id) o.price = round_tick(price->value(my));
+    } else if (moved && C.drag == ChartState::PAN) {
+        double dx = (mx - C.press_x) / L.ppb();
+        if (!(g.follow && std::fabs(mx - C.press_x) < 3 * L.s)) {
+            g.follow = false;
+            Z.on = false, g_pan_left = 0;
+            g.xmin = C.xmin0 - dx, g.xmax = C.xmax0 - dx;
+            clamp_view();
+        }
+    }
+    int cur = CURSOR_CROSSHAIR;
+    if (C.drag == ChartState::ORDER || (C.drag == ChartState::NONE && pn && pn->pm->price && order_near(L, *pn, my)))
+        cur = CURSOR_NS;
+    else if (C.drag == ChartState::PAN) cur = CURSOR_MOVE;
+    else if (!pn) cur = CURSOR_ARROW;
+    g_cursor_request = cur;
+    if (!hovered) return;
+    // Vertical scrolling zooms, sideways scrolling pans (Shift turns a mouse wheel sideways). Trackpad deltas
+    // apply at once, so the chart follows the fingers; mouse-wheel notches glide.
+    for (ScrollEvent& e : frame_scroll()) {
+        double h = e.dx, v = e.dy;
+        if (io.KeyShift && h == 0) h = v, v = 0;
+        if (h != 0) pan(-h * L.s / L.ppb(), e.notch);
+        if (v != 0) zoom(L, std::pow(kZoomStep, v / kNotch), mx, e.notch);
+        e.dx = e.dy = 0;
+    }
 }
 
 // ---------------------------------------------------------------- equity curves
 // Cumulative $ after each trade, for the replay's trades and for backtests.
-void draw_curve(BuiRaster* r, const int rect[4], const std::vector<double>& eq_in, const char* empty) {
-    Painter P{r, static_cast<float>(rect[0]), static_cast<float>(rect[1])};
-    float s = ui_scale(), w = static_cast<float>(rect[2]), h = static_cast<float>(rect[3]);
-    Rgba region = theme("region_bg", {0.19f, 0.19f, 0.19f, 1}), text = theme("text", {0.9f, 0.9f, 0.9f, 1});
+void draw_curve(float h, const std::vector<double>& eq_in, const char* empty) {
+    ImVec2 o = ImGui::GetCursorScreenPos();
+    float s = ui_scale(), w = ImGui::GetContentRegionAvail().x;
+    ImGui::Dummy(ImVec2(w, h));
+    Painter P{ImGui::GetWindowDrawList(), o.x, o.y};
+    Rgba region = style_color(ImGuiCol_WindowBg), text = style_color(ImGuiCol_Text);
     P.round_rect(0, 0, w, h, 3 * s, {region.r * 0.72f, region.g * 0.72f, region.b * 0.72f, 1});
     if (eq_in.empty()) {
         P.text(8 * s, h / 2, empty, kFont * s, text.alpha(0.45f));
@@ -744,50 +756,39 @@ void draw_curve(BuiRaster* r, const int rect[4], const std::vector<double>& eq_i
     Box b{4 * s, 4 * s, w - 4 * s, h - 4 * s};
     auto px = [&](size_t i) { return b.x0 + b.w() * static_cast<float>(i) / std::max<size_t>(1, eq.size() - 1); };
     auto py = [&](double v) { return b.y1 - static_cast<float>((v - lo) / (hi - lo)) * b.h(); };
-    P.line(b.x0, py(0), b.x1, py(0), 1, text.alpha(0.2f), b);
-    size_t step = std::max<size_t>(1, eq.size() / static_cast<size_t>(std::max(1.0f, b.w())));
-    for (size_t i = step; i < eq.size(); i += step) P.line(px(i - step), py(eq[i - step]), px(i), py(eq[i]), 1.5f * s, eq.back() >= 0 ? kBuy : kSell, b);
+    P.line(b.x0, py(0), b.x1, py(0), P.hair(), text.alpha(0.2f), b);
+    size_t step = std::max<size_t>(1, eq.size() / static_cast<size_t>(std::max(1.0f, b.w() * px_scale())));
+    std::vector<ImVec2> pts;
+    for (size_t i = 0; i < eq.size(); i += step) pts.push_back(ImVec2(px(i), py(eq[i])));
+    if ((eq.size() - 1) % step) pts.push_back(ImVec2(px(eq.size() - 1), py(eq.back())));
+    P.polyline(pts, 1.5f * s, eq.back() >= 0 ? kBuy : kSell, b);
     P.text(b.x0 + 2 * s, b.y0 + 6 * s, fmt("%+.0f", eq.back()), kFont * s, text.alpha(0.7f));
-}
-
-void equity_draw(void*, BKNode*, BuiRaster* r, const int rect[4]) {
-    std::vector<double> eq;
-    double v = 0;
-    for (const RoundTrip& t : g.broker.trips) eq.push_back(v += t.pnl);
-    draw_curve(r, rect, eq, "equity curve: no closed trades yet");
-}
-
-void bt_curve_draw(void*, BKNode*, BuiRaster* r, const int rect[4]) {
-    draw_curve(r, rect, g.bt_result.equity, "backtest equity: run a backtest");
 }
 
 }  // namespace
 
-static void equity_size();
-static BKNode* g_equity;
+void chart_set_fonts(ImFont* text, ImFont* title) { g_font = text, g_font_title = title; }
 
-void chart_load_font() {
-    FILE* f = open_file(data_dir() / "chart_font.ttf", "rb");
-#ifdef RT_FONT
-    if (!f) f = std::fopen(RT_FONT, "rb");
-#endif
-    if (!f) return;
-    std::vector<char> data;
-    char buf[65536];
-    for (size_t n; (n = std::fread(buf, 1, sizeof buf, f)) > 0;) data.insert(data.end(), buf, buf + n);
-    std::fclose(f);
-    if (BUI_text_add_font("Berkeley Mono", 0, data.data(), static_cast<int>(data.size()))) g_family = "Berkeley Mono";
+void chart_draw(float w, float h) {
+    ImVec2 o = ImGui::GetCursorScreenPos();
+    ImGui::InvisibleButton("##chart", ImVec2(std::max(w, 1.0f), std::max(h, 1.0f)));
+    bool hovered = ImGui::IsItemHovered(), pressed = ImGui::IsItemActivated();
+    Layout L = layout(w, h);
+    if (g.s.n() && M.n == g.s.n() && !L.panes.empty()) chart_input(L, o, hovered, pressed);
+    Painter P{ImGui::GetWindowDrawList(), o.x, o.y};
+    P.dl->PushClipRect(o, ImVec2(o.x + w, o.y + h), true);
+    draw_chart(P, layout(w, h));  // after input: pans and zooms show in this frame
+    P.dl->PopClipRect();
 }
 
-BKNode* chart_new() {
-    static BKCustomClass cls{};
-    cls.event = chart_event;
-    cls.draw = chart_draw;
-    BKNode* n = BK_node_new("custom");
-    BK_custom_set(n, &cls, nullptr);
-    C.node = n;
-    return n;
+void equity_draw(float h) {
+    std::vector<double> eq;
+    double v = 0;
+    for (const RoundTrip& t : g.broker.trips) eq.push_back(v += t.pnl);
+    draw_curve(h, eq, "equity curve: no closed trades yet");
 }
+
+void backtest_curve_draw(float h) { draw_curve(h, g.bt_result.equity, "backtest equity: run a backtest"); }
 
 // Price-axis easing: the fitted range jumps whenever a high or low scrolls in or out of view; the axis glides
 // there instead. It snaps on a new session, a timeframe change or the first frame.
@@ -891,58 +892,5 @@ void chart_prepare() {
         }
         M.panes.push_back(pm);
     }
-    // Redraw only when something drawn changed: the chart is the most expensive thing to paint, and frames
-    // also run for the panels (scrolling the sidebar must not repaint it).
-    std::vector<double> sig = {static_cast<double>(g.cursor), static_cast<double>(g.tf_idx), g.xmin, g.xmax,
-                               price.ymin, price.ymax, static_cast<double>(g.s_version), static_cast<double>(g_scripts.generation()),
-                               static_cast<double>(g.hide_dates), static_cast<double>(g.sessions), static_cast<double>(g.broker.pos),
-                               g.broker.avg, static_cast<double>(g.broker.fills.size())};
-    for (const Order& o : g.broker.orders) sig.push_back(o.id), sig.push_back(o.price);
-    for (const Ind& d : g.inds) {
-        sig.push_back(d.uid), sig.push_back(d.on), sig.push_back(d.col.r), sig.push_back(d.col.g), sig.push_back(d.col.b);
-        sig.insert(sig.end(), d.params.begin(), d.params.end());
-    }
-    for (const PaneModel& pm : M.panes) sig.push_back(pm.ymin), sig.push_back(pm.ymax);
-    static std::vector<double> last_sig;
-    if (sig != last_sig) {
-        last_sig = std::move(sig);
-        if (C.node) BK_node_invalidate(C.node);
-    }
-    equity_size();
-    static size_t last_trips = SIZE_MAX;
-    if (g_equity && g.broker.trips.size() != last_trips) last_trips = g.broker.trips.size(), BK_node_invalidate(g_equity);
 }
 
-// The equity curve's natural height is in raster pixels, so it is set again when the UI scale changes (Retina).
-static int g_equity_unit = 0;
-
-static void equity_size() {
-    if (!g_equity || BK_unit() == g_equity_unit) return;
-    g_equity_unit = BK_unit();
-    BKCustomClass cls{};
-    cls.draw = equity_draw;
-    cls.natural_h = static_cast<int>(4.5 * g_equity_unit);
-    BK_custom_set(g_equity, &cls, nullptr);
-    BK_node_relayout(g_equity);
-}
-
-BKNode* equity_new() {
-    g_equity = BK_node_new("custom");
-    equity_size();
-    return g_equity;
-}
-
-static BKNode* g_bt_curve = nullptr;
-
-BKNode* backtest_curve_new() {
-    g_bt_curve = BK_node_new("custom");
-    static BKCustomClass cls{};
-    cls.draw = bt_curve_draw;
-    cls.natural_h = static_cast<int>(4.5 * std::max(1, BK_unit()));
-    BK_custom_set(g_bt_curve, &cls, nullptr);
-    return g_bt_curve;
-}
-
-void backtest_curve_changed() {
-    if (g_bt_curve) BK_node_invalidate(g_bt_curve);
-}

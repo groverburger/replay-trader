@@ -11,6 +11,10 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
 endif()
 
 project(replay_trader VERSION 1.1 LANGUAGES CXX C)
+if(APPLE)
+  enable_language(OBJC)    # src/mac_input.m
+  enable_language(OBJCXX)  # src/mac_metal.mm, ImGui's Metal backend
+endif()
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -23,18 +27,35 @@ if(RT_DIST)  # no build-machine paths (assert messages use __FILE__) in a binary
   add_compile_options("-ffile-prefix-map=${CMAKE_BINARY_DIR}=build" "-ffile-prefix-map=${CMAKE_SOURCE_DIR}=src")
 endif()
 
-# BUI (Blender's UI as a C library): only the C kit, no bindings, tests or examples.
+# Dear ImGui (UI), GLFW (window, input, OpenGL context) and the Inter font: MIT / zlib / OFL, fetched at
+# exact versions. The chart is drawn with ImGui's draw lists; --screenshot renders on the CPU (src/softraster.cpp).
 include(FetchContent)
-set(BUI_BUILD_TESTS OFF CACHE BOOL "" FORCE)
-set(BUI_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
-set(BUI_BUILD_PYTHON_BINDINGS OFF CACHE BOOL "" FORCE)
-set(BUI_BUILD_IMGUI OFF CACHE BOOL "" FORCE)
-set(BUI_BUILD_LUA_BINDINGS OFF CACHE BOOL "" FORCE)
-# packaging/bui/precise-scroll.patch: trackpads scroll by exact pixels (BUI v0.5.0 rounds them to wheel notches)
-FetchContent_Declare(bui GIT_REPOSITORY https://github.com/ppmpreetham/BUI.git GIT_TAG v0.5.0 GIT_SHALLOW TRUE
-  PATCH_COMMAND ${CMAKE_COMMAND} -DPATCH=${CMAKE_CURRENT_SOURCE_DIR}/packaging/bui/precise-scroll.patch
-                -P ${CMAKE_CURRENT_SOURCE_DIR}/packaging/bui/apply_patch.cmake)
-FetchContent_MakeAvailable(bui)
+set(GLFW_BUILD_DOCS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(GLFW_INSTALL OFF CACHE BOOL "" FORCE)
+set(GLFW_BUILD_WAYLAND OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(glfw GIT_REPOSITORY https://github.com/glfw/glfw.git GIT_TAG 3.4 GIT_SHALLOW TRUE)
+FetchContent_Declare(imgui GIT_REPOSITORY https://github.com/ocornut/imgui.git GIT_TAG v1.91.9b GIT_SHALLOW TRUE)
+FetchContent_Declare(inter URL https://github.com/rsms/inter/releases/download/v4.0/Inter-4.0.zip
+  URL_HASH SHA256=ff970a5d4561a04f102a7cb781adbd6ac4e9b6c460914c7a101f15acb7f7d1a4 DOWNLOAD_EXTRACT_TIMESTAMP TRUE)
+FetchContent_MakeAvailable(glfw imgui inter)
+add_library(imgui_static STATIC
+  ${imgui_SOURCE_DIR}/imgui.cpp
+  ${imgui_SOURCE_DIR}/imgui_draw.cpp
+  ${imgui_SOURCE_DIR}/imgui_tables.cpp
+  ${imgui_SOURCE_DIR}/imgui_widgets.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_glfw.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl3.cpp
+  ${imgui_SOURCE_DIR}/backends/imgui_impl_opengl2.cpp)
+target_include_directories(imgui_static PUBLIC ${imgui_SOURCE_DIR} ${imgui_SOURCE_DIR}/backends)
+target_compile_definitions(imgui_static PUBLIC IMGUI_DISABLE_OBSOLETE_FUNCTIONS "ImDrawIdx=unsigned int")
+target_link_libraries(imgui_static PUBLIC glfw)
+if(APPLE)  # macOS renders with Metal
+  target_sources(imgui_static PRIVATE ${imgui_SOURCE_DIR}/backends/imgui_impl_metal.mm)
+  set_source_files_properties(${imgui_SOURCE_DIR}/backends/imgui_impl_metal.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+  target_link_libraries(imgui_static PUBLIC "-framework Metal" "-framework QuartzCore" "-framework Cocoa")
+endif()
 
 # Lua 5.4 for indicator and strategy scripts
 FetchContent_Declare(lua URL https://www.lua.org/ftp/lua-5.4.7.tar.gz
@@ -48,21 +69,22 @@ if(UNIX)
   target_compile_definitions(lua_static PRIVATE LUA_USE_POSIX)
 endif()
 
-# Built-in scripts and the scripting reference, compiled in (src/embedded_files.h)
+# Built-in scripts, the scripting reference and the Inter font, compiled in (src/embedded_files.h)
 file(GLOB_RECURSE RT_SCRIPTS CONFIGURE_DEPENDS ${CMAKE_CURRENT_SOURCE_DIR}/scripts/*.lua)
 set(RT_EMBEDDED ${CMAKE_CURRENT_BINARY_DIR}/embedded_files.cpp)
 add_custom_command(OUTPUT ${RT_EMBEDDED}
   COMMAND ${CMAKE_COMMAND} -DROOT=${CMAKE_CURRENT_SOURCE_DIR}/scripts -DOUT=${RT_EMBEDDED}
-          "-DEXTRA=README.md=${CMAKE_CURRENT_SOURCE_DIR}/docs/SCRIPTING.md"
+          "-DEXTRA=README.md=${CMAKE_CURRENT_SOURCE_DIR}/docs/SCRIPTING.md|fonts/Inter-Regular.ttf=${inter_SOURCE_DIR}/extras/ttf/Inter-Regular.ttf|fonts/Inter-SemiBold.ttf=${inter_SOURCE_DIR}/extras/ttf/Inter-SemiBold.ttf"
           -P ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_files.cmake
-  DEPENDS ${RT_SCRIPTS} ${CMAKE_CURRENT_SOURCE_DIR}/docs/SCRIPTING.md ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_files.cmake
-  COMMENT "Embedding scripts")
+  DEPENDS ${RT_SCRIPTS} ${CMAKE_CURRENT_SOURCE_DIR}/docs/SCRIPTING.md ${inter_SOURCE_DIR}/extras/ttf/Inter-Regular.ttf ${CMAKE_CURRENT_SOURCE_DIR}/cmake/embed_files.cmake
+  COMMENT "Embedding scripts and fonts" VERBATIM)
 
 set(RT_SOURCES
   ${RT_EMBEDDED}
   src/script.cpp
   src/strategy.cpp
   src/main.cpp
+  src/softraster.cpp
   src/panels.cpp
   src/setup.cpp
   src/chart.cpp
@@ -71,6 +93,10 @@ set(RT_SOURCES
   src/broker.cpp
   src/datafeed.cpp
   src/http.cpp)
+if(APPLE)
+  list(APPEND RT_SOURCES src/mac_input.m src/mac_metal.mm)
+  set_source_files_properties(src/mac_metal.mm PROPERTIES COMPILE_OPTIONS -fobjc-arc)
+endif()
 
 if(RT_DIST AND APPLE)
   add_executable(replay_trader MACOSX_BUNDLE ${RT_SOURCES})
@@ -92,6 +118,7 @@ else()
 endif()
 
 target_include_directories(replay_trader PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/src)
+target_compile_definitions(replay_trader PRIVATE GL_SILENCE_DEPRECATION)  # macOS: OpenGL is the fallback renderer
 
 if(NOT RT_DIST)  # the developer's chart font, if it's on this machine (it isn't redistributable)
   set(RT_FONT_FILE "${CMAKE_CURRENT_SOURCE_DIR}/../strategy_report/pdf_src/fonts/BerkeleyMono-Regular.ttf")
@@ -101,11 +128,15 @@ if(NOT RT_DIST)  # the developer's chart font, if it's on this machine (it isn't
 endif()
 
 if(WIN32)
-  target_link_libraries(replay_trader PRIVATE bui::kit lua_static winhttp shell32)
+  target_link_libraries(replay_trader PRIVATE imgui_static lua_static opengl32 winhttp shell32)
   if(MINGW)  # no libstdc++/libgcc/winpthread DLLs to ship
     target_link_options(replay_trader PRIVATE -static -static-libgcc -static-libstdc++ $<$<BOOL:${RT_DIST}>:-s>)
   endif()
 else()
   find_package(CURL REQUIRED)  # part of macOS; libcurl4-openssl-dev on Debian/Ubuntu
-  target_link_libraries(replay_trader PRIVATE bui::kit lua_static CURL::libcurl)
+  find_package(OpenGL REQUIRED)
+  target_link_libraries(replay_trader PRIVATE imgui_static lua_static OpenGL::GL CURL::libcurl)
+  if(APPLE)
+    target_link_libraries(replay_trader PRIVATE "-framework Cocoa")
+  endif()
 endif()

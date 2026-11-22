@@ -1,21 +1,21 @@
-// The price chart (with oscillator panes) and the equity curve: BUI "custom" nodes that draw themselves into the
-// kit's raster and handle their own pointer input.
+// The price chart (with oscillator panes) and the equity curves, drawn with ImGui draw lists. The chart handles
+// its own pointer input: pan, zoom, crosshair, Cmd/Ctrl+click limits, Shift+click stops, dragging order lines.
 #pragma once
 
-struct BKNode;
+struct ImFont;
 
-// Registers the chart font: chart_font.ttf in the data folder, else the build machine's RT_FONT if there is one;
-// without either the chart uses the UI font (Inter).
-void chart_load_font();
+// The fonts the chart draws its labels with (chart_font.ttf, the developer's RT_FONT, or the UI font) at the
+// axis size (11 pt) and the title size; set after the font atlas is built.
+void chart_set_fonts(ImFont* text, ImFont* title);
 
-BKNode* chart_new();
-// Recomputes indicators and axis ranges for the current replay state; call before the chart is rendered.
+// Recomputes indicators and axis ranges for the current replay state; call once per frame before drawing.
 void chart_prepare();
-// Advances the zoom and axis easing by dt seconds (before chart_prepare); true while still animating.
+// Advances the zoom and pan easing by dt seconds (before chart_prepare); true while still animating.
 bool chart_animate(double dt);
 bool chart_animating();  // after chart_prepare: whether another frame is needed
 
-BKNode* equity_new();
-// The equity curve of the last backtest (g.bt_result); call backtest_curve_changed() when it changes.
-BKNode* backtest_curve_new();
-void backtest_curve_changed();
+// The chart at the current cursor position, w x h interface units.
+void chart_draw(float w, float h);
+// Equity curves (full available width): the replay's closed trades, and the last backtest (g.bt_result).
+void equity_draw(float h);
+void backtest_curve_draw(float h);
