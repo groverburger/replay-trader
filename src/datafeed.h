@@ -1,5 +1,5 @@
-// NQ 1-minute bars from the karaiq Futures Data API (https://api.karaiq.com, the API behind Team Safi's
-// observix_data_api SDK), cached per month in the user's data folder.
+// NQ 1-minute bars from the karaiq Futures Data API (https://api.karaiq.com), cached per month in the user's
+// data folder.
 //
 // The API serves the continuous front month with US Central bar-start times, newest first, at most 1,380 rows
 // per request (exactly one Globex day of minutes), so we request one calendar day at a time. Months already on

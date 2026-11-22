@@ -63,9 +63,10 @@ and a time-limit hook stops runaway loops.
   over the shared, read-only market. That takes about 0.1–0.4 s per year of 1-minute data.
 
 Backtests can run on `qc_roll_schedule(m)` (`src/datafeed.cpp`), a copy of the market that rolls on
-QuantConnect's schedule. That schedule was found empirically by Team Safi; the 2025-09 and 2025-12 spreads were
-measured from QuantConnect's own fills. With it, the Lua port of Team Safi's `live_strategy_1` matches their
-`fastbt`/`engine.py` on 100% of 1,936 trades for 2020–2025, with identical P&L.
+QuantConnect's schedule. That schedule was determined empirically by comparing against QuantConnect backtests; the
+2025-09 and 2025-12 spreads were measured from QuantConnect's own fills. With it, a Lua port of a production
+QuantConnect strategy matched an independent, QuantConnect-validated reference engine on 100% of 1,936 trades for
+2020–2025, with identical P&L.
 
 The Lua indicators were checked against the old C++ implementations on 1m, 5m and 1h series. They match to
 within 1e-11, with identical missing-value boundaries and identical pivots.
@@ -96,7 +97,7 @@ by the jump instead of booking it as P&L.
 
 `kRolls` in `src/datafeed.cpp` lists the splice minute and jump for every roll through 2026-09:
 
-- **Through 2024-06:** the splice is 00:00 on the 14th, with the spreads from Team Safi's 15-minute research data.
+- **Through 2024-06:** the splice is 00:00 on the 14th, with spreads measured on 15-minute bars of the same data.
 - **From 2025-09:** the actual 1-minute splice minute. The 15-minute roll times used in that research data are
   7–14 minutes early on five rolls, which would make a held position show a fake jump of about 230–290 points.
 

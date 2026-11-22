@@ -1,6 +1,6 @@
 """Export NQ 1-minute bars for the replay trader.
 
-Source: nq_research/data/nq_1min.parquet (continuous front month, back-adjusted, with raw closes).
+Source: a parquet file of NQ 1-minute bars (continuous front month, back-adjusted, with raw closes); set SRC.
 Writes data/nq_1m.bin with prices as traded (unadjusted front month) plus, per bar, the back-adjustment
 offset, so the app can roll an open position across a contract change without a fake P&L jump.
 
@@ -18,7 +18,7 @@ import numpy as np
 import pandas as pd
 
 HERE = Path(__file__).resolve().parent.parent  # the repo root
-SRC = HERE.parent / "nq_research" / "data" / "nq_1min.parquet"  # Team Safi research data, next to this repo
+SRC = HERE / "data" / "nq_1min.parquet"  # columns: bar_start_ny, open, high, low, close, volume, raw_close
 
 
 def main():

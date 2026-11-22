@@ -225,7 +225,7 @@ These are the best starting points for your own:
 to the next quarterly contract about a week before expiry. QuantConnect's mapped contract rolls later: at the
 18:00 ET session on the Wednesday before the third-Friday expiry, a day earlier in Juneteenth weeks. With this
 option, backtests price the contract QuantConnect still holds between the two dates, and shift open positions
-at QuantConnect's roll. Combined with `fill = "close"`, it reproduces Team Safi's QuantConnect-validated engine
+at QuantConnect's roll. Combined with `fill = "close"`, it reproduces a QuantConnect-validated reference engine
 trade for trade.
 
 Backtest results are hypothetical. They use 1-minute bars with conservative fill rules, so they still can't

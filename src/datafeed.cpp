@@ -187,7 +187,7 @@ void sort_unique(std::vector<RawBar>& v) {
 // The API's continuous series splices to the next quarterly contract a few days before expiry. Each splice is a
 // jump (new minus old contract) that no trader saw; the app shifts an open position by it instead
 // of booking it as P&L. Minutes are New York bar starts. Through 2024-06 they are 00:00 on the 14th, with the
-// spreads used by Team Safi's 15-minute research data; later ones were found on 1-minute bars (the largest
+// spreads measured on 15-minute bars of the same data; later ones were found on 1-minute bars (the largest
 // open-minus-previous-close jump near expiry, which stands out by 10x or more).
 struct Roll {
     const char* ny;  // first bar on the new contract
@@ -288,8 +288,8 @@ void apply_rolls(Market& m, std::vector<std::string>* notes) {
 
 // ---------------------------------------------------------------- QuantConnect's roll schedule
 // QuantConnect's mapped NQ contract rolls at the session opening 18:00 ET on the Wednesday before the
-// third-Friday expiry (a day earlier in Juneteenth weeks): found empirically by Team Safi against QC
-// backtests (local_backtester/rolls.py). The API rolls days earlier, so between the two QC still holds
+// third-Friday expiry (a day earlier in Juneteenth weeks), as found empirically against QuantConnect
+// backtests. The API rolls days earlier, so between the two QC still holds
 // the old contract. These spreads were measured from QC's own fills where the API splices mid-bar.
 static int64_t qc_roll_minute(int y, int mo) {
     int64_t d15 = days_from_civil(y, mo, 15);
