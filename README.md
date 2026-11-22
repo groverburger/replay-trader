@@ -1,117 +1,80 @@
 # Replay Trader
 
-Practise trading Nasdaq-100 futures (NQ) on real history, one minute at a time. Pick a day, or let the app pick
-a random one, then step or play the market forward and trade it with a paper broker. You never see what happens
-next: the chart only shows minutes that have already been revealed.
+Replay Nasdaq-100 futures (NQ) history one minute at a time and paper-trade it. The chart shows only minutes
+already revealed.
 
-![The replay trader on 9 April 2025: 5-minute NQ chart with EMA, Bollinger bands, VWAP, swing pivots, RSI and MACD, and a working sell limit](docs/trader.png)
+![5-minute NQ chart on 9 April 2025 with EMA, Bollinger bands, VWAP, swing pivots, RSI, MACD and a sell limit](docs/trader.png)
 
-- **Real data, no peeking.** NQ 1-minute bars from December 2009 to the present. The current bar builds minute
-  by minute, indicators update with it, and swing pivots appear only once they're confirmed.
-- **Any timeframe.** 1m, 5m, 15m, 30m, 1h, 4h and daily, switchable mid-replay.
-- **A realistic paper broker.** Market, limit and stop orders, brackets (stop + target), slippage and commissions,
-  NQ ($20/pt) or MNQ ($2/pt). Fills follow the next minute's prices, and contract rolls never create fake P&L.
-- **Indicators you can write yourself.** SMA, EMA, Bollinger bands, VWAP with bands, swing pivots with levels,
-  RSI, MACD, ATR, volume, prior-day and overnight levels, and the opening range. Every one of them is a short
-  Lua script. Drop your own into the scripts folder and it appears in the app, with no rebuilding.
-- **Automated strategies and backtests.** Strategies are Lua scripts too. They can place market, limit and stop
-  orders with brackets, trail stops, react to fills and work on any timeframe. Let one trade the replay
-  alongside you, or backtest it over years of data in seconds, with statistics and an equity curve.
-- **Track your results.** A trade list, win rate, profit factor, max drawdown and equity curve, with CSV export.
-- **Blind practice.** Hide the dates so you can't recall what happened that day.
+- NQ 1-minute data from December 2009 to the present.
+- Timeframes from 1 minute to daily.
+- Paper broker: market, limit, stop and bracket orders, slippage, commissions, NQ or MNQ.
+- Indicators and strategies written in Lua; add your own without rebuilding.
+- Strategy backtests with statistics and an equity curve.
+- Trade list, win rate, profit factor, drawdown, CSV export.
+- Option to hide dates for blind practice.
 
 ## Download
 
-Get the latest build from the [Releases](../../releases) page:
+Download from [Releases](../../releases): `Replay-Trader-macOS.zip` (macOS 11+, Apple Silicon and Intel) or
+`Replay-Trader-Windows.zip` (Windows 10+, 64-bit).
 
-| | |
-|---|---|
-| **macOS** 11 or later (Apple Silicon and Intel) | `Replay-Trader-macOS.zip` |
-| **Windows** 10 or later (64-bit) | `Replay-Trader-Windows.zip` |
+The apps are not signed with a paid certificate:
 
-The apps aren't signed with a paid Apple or Microsoft certificate, so the first launch needs one extra step:
-
-- **macOS:** unzip, move the app to Applications and open it. When macOS refuses, go to
-  **System Settings > Privacy & Security** and click **Open Anyway**. (On macOS 14 and earlier, right-click the
-  app and choose **Open**.)
-- **Windows:** unzip and run `ReplayTrader.exe`. If SmartScreen says "Windows protected your PC", click
-  **More info > Run anyway**.
+- **macOS:** open the app, then click **Open Anyway** in System Settings > Privacy & Security.
+- **Windows:** click **More info > Run anyway** at the SmartScreen prompt.
 
 ## Getting started
 
-You need an API key for the [karaiq Futures Data API](https://api.karaiq.com), which supplies the market data.
+You need an API key for the [karaiq Futures Data API](https://api.karaiq.com).
 
-<img src="docs/data-screen.png" alt="The first-run screen: API key field, Download, Stop and Use cached data buttons" width="640">
+<img src="docs/data-screen.png" alt="First-run screen with API key field and download buttons" width="640">
 
-1. Paste your key and press **Download data**. Tick "Remember" so you won't be asked again.
-2. The full history is about 4,400 requests, and the API answers them one at a time, so the first download takes
-   about an hour. It downloads newest first, so you can press **Stop** after a few minutes, choose
-   **Use cached data**, and start trading the recent months. The rest resumes the next time you open the app.
-3. After that, each start only fetches the new days, which takes a few seconds.
+1. Enter the key and press **Download data**.
+2. The full history takes about an hour. It downloads newest first, so you can press **Stop**, then
+   **Use cached data**, and trade recent months. The download resumes on the next launch.
+3. Later launches fetch only new days.
 
-The data (about 150 MB), your saved key and exported trades are stored in
-`~/Library/Application Support/Replay Trader/` on macOS, or `%APPDATA%\Replay Trader\` on Windows.
-Delete that folder to remove everything.
+Data (about 150 MB), the saved key and exports are stored in `~/Library/Application Support/Replay Trader/`
+(macOS) or `%APPDATA%\Replay Trader\` (Windows).
 
-## How to use it
-
-**Replay**
-
-| Key | Action |
-|---|---|
-| Space | Play / pause (1 to 600 minutes per second, Up/Down to change) |
-| Right | Reveal one more minute |
-| Shift+Right | Finish the current chart bar |
-| N | Jump to just before the next 09:30 open |
-| L | Follow the latest bar again after scrolling back |
-
-The **Random day** button starts a new session at 09:25 New York time on a random day. To start at a specific
-moment, type a date and time into the field and press **Start here**. "Skip overnight" plays straight from the
-close to the next open. Scroll to zoom. Drag the chart, swipe sideways on a trackpad or Shift+scroll to look back, and press L to catch up again.
-
-**Trading**
+## Controls
 
 | Key / mouse | Action |
 |---|---|
+| Space | Play / pause |
+| Up / Down | Change speed |
+| Right | Reveal one minute |
+| Shift+Right | Finish the current bar |
+| N | Jump to the next 09:30 open |
+| L | Follow the latest bar |
 | B / S | Market buy / sell |
-| X | Flatten (close the position and cancel orders) |
-| C | Cancel working orders |
-| Cmd/Ctrl+click on the chart | Place a limit order at that price |
-| Shift+click on the chart | Place a stop order at that price |
+| X | Flatten |
+| C | Cancel orders |
+| Cmd/Ctrl+click chart | Limit order at that price |
+| Shift+click chart | Stop order at that price |
 | Drag an order line | Move the order |
+| Scroll / drag | Zoom / pan |
 
-The order ticket sets the contract (NQ or MNQ), quantity, slippage, commission and an optional bracket. Orders
-fill against the next revealed minute:
+Orders fill on the next minute: market orders at the open plus slippage, stops at the worse of the stop price
+and the open, limits when price trades through by a tick. If a bracket's stop and target are hit in the same
+minute, the stop counts. All times are New York time.
 
-- Market orders fill at the open, plus slippage.
-- Stops fill at the stop price or the open, whichever is worse.
-- Limits fill only when price trades through by a tick, or touches it if you tick "limit fills on touch".
+Command-line options: `--api-key KEY`, `--offline`, `--start "2025-04-09 09:25"`, `--demo`, and
+`--backtest ID --bt-from DATE --bt-to DATE [--set name=value] [--bt-csv FILE]`.
 
-When a bracket's stop and target are both hit inside one minute, it counts as stopped out.
+## Lua scripts
 
-Times are New York time. Drag a number field to scrub it, or click it and type a value or an expression such as
-`20*1.5` (Enter applies, Esc cancels).
+![Strategy panel with backtest statistics and equity curve](docs/strategy.png)
 
-**Command line (optional).** Options are `--api-key KEY` (or set `NQ_API_KEY`), `--offline` to use the
-downloaded data without connecting, `--start "2025-04-09 09:25"` and `--demo`.
-
-`--backtest orb --bt-from 2025-01-01 --bt-to 2025-12-31 [--set qty=2] [--bt-csv trades.csv]` runs a strategy
-from the terminal and prints its statistics.
-
-## Indicators and strategies in Lua
-
-![The Strategy panel: an opening range breakout trading the replay, with its backtest statistics and equity curve](docs/strategy.png)
-
-Every indicator and strategy is a Lua file. The built-in ones are copied to `scripts/examples/` in the data
-folder for you to read and adapt. Your own go in `scripts/indicators/` and `scripts/strategies/`; the
-**Scripts folder** button opens it. Saved changes appear within a second. A minimal indicator looks like this:
+Indicators and strategies are Lua files. Put your own in `scripts/indicators/` and `scripts/strategies/` in the
+data folder; changes load within a second. Copies of the built-in scripts are in `scripts/examples/`.
 
 ```lua
 return indicator {
   name = "My EMA",
   overlay = true,
   params = { { "period", 50, min = 2, max = 500 } },
-  plots = { { "EMA", width = 1.6 } },
+  plots = { { "EMA" } },
   calc = function(bars, p, out)
     local ema = ta.ema(p.period)
     for i = 1, bars.n do out.EMA[i] = ema:update(bars.close[i]) end
@@ -119,35 +82,26 @@ return indicator {
 }
 ```
 
-Strategies see only closed bars, and their orders fill under the same rules as yours, so backtests can't peek
-ahead. The built-in strategies are an opening range breakout, an EMA trend follower on 5-minute bars and a VWAP
-mean reversion. They demonstrate brackets, stop entries, trailing stops, time stops and a daily loss limit.
-[docs/SCRIPTING.md](docs/SCRIPTING.md) is the full reference; it is also the README in your scripts folder.
+Strategies see only closed bars and fill under the same rules as manual orders. They can auto-trade the replay
+or run as backtests. See [docs/SCRIPTING.md](docs/SCRIPTING.md) for the API.
 
-Backtests are hypothetical: 1-minute bars can't show queue position or fast-market slippage, and the data has a
-few gaps, which the backtest log points out.
+Backtests are hypothetical. 1-minute bars cannot model queue position or fast-market slippage.
 
-## Building from source
+## Building
 
-You need CMake 3.20 or later and a C++17 compiler: Xcode command line tools on macOS, or MSVC or MinGW-w64 on
-Windows. [Dear ImGui](https://github.com/ocornut/imgui), [GLFW](https://www.glfw.org), Lua 5.4 and the
-[Inter](https://rsms.me/inter/) font are downloaded and built automatically. The interface draws on the GPU: Metal
-on macOS, OpenGL on Windows.
+Requires CMake 3.20+ and a C++17 compiler. Dependencies are downloaded automatically.
 
 ```sh
 cmake -S . -B build && cmake --build build -j
 ./build/replay_trader
 ```
 
-`-DRT_DIST=ON` builds the shareable app: a universal `.app` on macOS, or a static `.exe` with no console on
-Windows. `packaging/package.sh` builds both zips from a Mac; it needs `brew install mingw-w64` for the Windows
-one. Pushing a tag such as `v1.0.0` builds both on GitHub Actions and attaches them to a release.
-[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) covers the data pipeline, contract rolls and code layout.
+`-DRT_DIST=ON` builds the distributable app. `packaging/package.sh` builds both release zips on a Mac
+(`brew install mingw-w64` for Windows). Pushing a `v*` tag builds a GitHub release. See
+[docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for internals.
 
 ## License
 
-MIT (see [LICENSE](LICENSE)). It includes Dear ImGui (MIT), GLFW (zlib), Lua (MIT) and the Inter font (SIL Open
-Font License 1.1); their license texts are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md), which also ships
-in every release zip.
+MIT. Third-party licenses (Dear ImGui, GLFW, Lua, Inter) are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
-This is a practice tool, not investment advice. Past market data says nothing reliable about future results.
+Not investment advice.
