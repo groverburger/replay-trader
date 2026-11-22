@@ -1,8 +1,42 @@
 diff --git a/kit/intern/kit_core.c b/kit/intern/kit_core.c
-index bc3f09a..de61c7f 100644
+index bc3f09a..38f44b4 100644
 --- a/kit/intern/kit_core.c
 +++ b/kit/intern/kit_core.c
-@@ -3361,12 +3361,28 @@ int BK_scroll(BKContext *ctx, int x, int y, float dx, float dy, int mods)
+@@ -2231,7 +2231,7 @@ int BK_render(BKContext *ctx, BuiRaster *r, int w, int h, int full)
+     ctx->full_dirty = true;
+     layout(ctx);
+   }
+-  if (!ctx->full_dirty && ctx->ndirty == 0) {
++  if (!ctx->full_dirty && ctx->ndirty == 0 && !ctx->has_blit) {
+     return 0;
+   }
+   bk_image_frame_begin(); /* a drawn frame: the image cache ages one generation */
+@@ -2244,7 +2244,10 @@ int BK_render(BKContext *ctx, BuiRaster *r, int w, int h, int full)
+     regions = 1;
+   }
+   else {
+-    BKRect bbox = ctx->dirty[0];
++    BKRect bbox = ctx->ndirty ? ctx->dirty[0] : ctx->blit;
++    if (ctx->has_blit) {
++      rect_union(&bbox, &ctx->blit); /* shifted pixels: presented, not redrawn */
++    }
+     for (int i = 0; i < ctx->ndirty; i++) {
+       BKRect d = ctx->dirty[i];
+       d.xmin = BK_MAX(d.xmin, 0);
+@@ -2257,10 +2260,11 @@ int BK_render(BKContext *ctx, BuiRaster *r, int w, int h, int full)
+       rect_union(&bbox, &ctx->dirty[i]);
+     }
+     BUI_raster_end_frame_region(r, bbox.xmin, bbox.ymin, bk_rw(&bbox), bk_rh(&bbox));
+-    regions = ctx->ndirty;
++    regions = BK_MAX(ctx->ndirty, 1);
+   }
+   ctx->full_dirty = false;
+   ctx->ndirty = 0;
++  ctx->has_blit = false;
+   return regions;
+ }
+ 
+@@ -3361,12 +3365,28 @@ int BK_scroll(BKContext *ctx, int x, int y, float dx, float dy, int mods)
      ctx->in_input--;
      return 1;
    }
@@ -37,10 +71,21 @@ index bc3f09a..de61c7f 100644
    return r;
  }
 diff --git a/kit/intern/kit_intern.h b/kit/intern/kit_intern.h
-index 6542312..22e77f8 100644
+index 6542312..5585867 100644
 --- a/kit/intern/kit_intern.h
 +++ b/kit/intern/kit_intern.h
-@@ -602,6 +602,7 @@ void bk_theme_env_init(void);
+@@ -570,6 +570,10 @@ struct BKContext {
+   bool layout_dirty, full_dirty;
+   BKRect dirty[BK_MAX_DIRTY];
+   int ndirty;
++  /* replay-trader patch: pixels a scroll region shifted in the raster since the last render; they are
++   * compared for presentation but not redrawn */
++  BKRect blit;
++  bool has_blit;
+   BKKeyBinding keys[BK_MAX_KEYS];
+   int nkeys;
+   BuiRaster *raster; /* last rendered frame (eyedropper sampling) */
+@@ -602,6 +606,7 @@ void bk_theme_env_init(void);
  extern const BKClass bk_cls_custom;
  extern const BKClass bk_cls_video; /* image/video.c */
  #define BK_IS_CUSTOM(n) ((n) && (n)->cls == &bk_cls_custom)
@@ -49,10 +94,80 @@ index 6542312..22e77f8 100644
  int bk_custom_event(BKNode *n, BKCustomEvent *e, int wx, int wy);
  void bk_custom_frames(BKContext *ctx);       /* BK_render: frame callbacks due */
 diff --git a/kit/intern/kit_widgets.c b/kit/intern/kit_widgets.c
-index 441d478..f6e234f 100644
+index 441d478..a2d0c45 100644
 --- a/kit/intern/kit_widgets.c
 +++ b/kit/intern/kit_widgets.c
-@@ -1239,6 +1239,29 @@ static int scroll_drag(BKNode *n, BKEvent *e)
+@@ -1209,12 +1209,68 @@ static void scroll_thumb(BKNode *n, float *ty, float *th)
+   *ty = n->y + (n->h - *th) * (ms ? (float)n->scroll / ms : 0.0f);
+ }
+ 
++/* replay-trader patch: scrolling moves only this region. Its children are re-arranged in place (sizes don't
++ * change), the pixels already drawn are shifted, and only the newly exposed strip and the scrollbar are
++ * drawn. Upstream relayouts and redraws the whole window for every pixel scrolled. Falls back to redrawing
++ * just this region when shifting isn't safe (pending redraws inside it, popups, no frame drawn yet). */
++static int scroll_shift(BKNode *n, int dy)
++{
++  BKContext *ctx = bk_ctx(n);
++  if (!ctx || ctx->layout_dirty) {
++    return 0; /* a full layout is coming anyway */
++  }
++  scroll_arrange(n);
++  BuiRaster *r = ctx->raster;
++  const int W = r ? BUI_raster_width(r) : 0, H = r ? BUI_raster_height(r) : 0;
++  const int cw = n->w - scroll_bar_w();
++  const int x0 = BK_MAX(n->x, 0), x1 = BK_MIN(n->x + cw, W);
++  const int y0 = BK_MAX(n->y, 0), y1 = BK_MIN(n->y + n->h, H);
++  const BKRect area = bk_rect(x0, y0, x1 - x0, y1 - y0);
++  bool ok = r && !ctx->full_dirty && W == ctx->win_w && H == ctx->win_h && x1 > x0 && y1 > y0 &&
++            abs(dy) < y1 - y0 && BK_popup_count(ctx) == 0;
++  for (int i = 0; ok && i < ctx->ndirty; i++) {
++    const BKRect *d = &ctx->dirty[i];
++    ok = !(d->xmin < area.xmax && area.xmin < d->xmax && d->ymin < area.ymax && area.ymin < d->ymax);
++  }
++  if (!ok) {
++    bk_invalidate(n);
++    return 1;
++  }
++  uint32_t *px = (uint32_t *)BUI_raster_pixels(r);
++  const size_t row = (size_t)(x1 - x0) * sizeof(uint32_t);
++  if (dy > 0) {
++    for (int y = y1 - 1; y >= y0 + dy; y--) {
++      memmove(px + (size_t)y * W + x0, px + (size_t)(y - dy) * W + x0, row);
++    }
++    bk_ctx_dirty_rect(ctx, bk_rect(x0, y0, x1 - x0, dy));
++  }
++  else {
++    for (int y = y0; y < y1 + dy; y++) {
++      memmove(px + (size_t)y * W + x0, px + (size_t)(y - dy) * W + x0, row);
++    }
++    bk_ctx_dirty_rect(ctx, bk_rect(x0, y1 + dy, x1 - x0, -dy));
++  }
++  bk_ctx_dirty_rect(ctx, bk_rect(n->x + cw, y0, n->w - cw, y1 - y0)); /* the scrollbar */
++  if (ctx->has_blit) {
++    ctx->blit.xmin = BK_MIN(ctx->blit.xmin, area.xmin), ctx->blit.ymin = BK_MIN(ctx->blit.ymin, area.ymin);
++    ctx->blit.xmax = BK_MAX(ctx->blit.xmax, area.xmax), ctx->blit.ymax = BK_MAX(ctx->blit.ymax, area.ymax);
++  }
++  else {
++    ctx->blit = area, ctx->has_blit = true;
++  }
++  bk_ctx_request(ctx);
++  return 1;
++}
++
+ static void scroll_set(BKNode *n, int v)
+ {
+   v = BK_CLAMP(v, 0, scroll_max(n));
+   if (v != n->scroll) {
++    const int dy = n->scroll - v;
+     n->scroll = v;
+-    bk_relayout(n);
++    if (!scroll_shift(n, dy)) {
++      bk_relayout(n);
++    }
+   }
+ }
+ 
+@@ -1239,6 +1295,29 @@ static int scroll_drag(BKNode *n, BKEvent *e)
    return 1;
  }
  

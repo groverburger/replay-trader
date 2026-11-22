@@ -17,9 +17,11 @@
 class StrategyRun {
 public:
     // `agg` is the strategy timeframe's aggregation of `m` (nullptr for 1-minute strategies). Calls init and
-    // on_day at minute `at` (the bar just revealed). Returns false (with error()) if the script fails.
+    // on_day at minute `at` (the bar just revealed). Orders are refused until a minute closes at or after
+    // `trade_from` (the warm-up). Returns false (with error()) if the script fails.
     bool start(lua_State* L, const ScriptDef& def, const Params& p, Broker* broker, const Market* m, const Agg* agg,
-               size_t at, std::vector<std::string>* log);
+               size_t at, std::vector<std::string>* log, int64_t trade_from = INT64_MIN);
+    bool trading() const { return m_->t[i_] + 1 >= trade_from_; }
     // After the broker has processed minute i: fills, then on_day / on_bar when a strategy bar closed.
     void after_minute(size_t i);
     void stop();
@@ -40,6 +42,9 @@ public:
     int orders(lua_State* L);
     int log(lua_State* L);
     int point_value(lua_State* L);
+    int is_trading(lua_State* L);
+    int open_next(lua_State* L);
+    int bar_end(lua_State* L);
 
 private:
     bool call(const char* fn, int nargs);  // def[fn](ctx, p, ...) with nargs extra values on the stack
@@ -53,6 +58,8 @@ private:
     long done_ = -1;               // last completed strategy bar (bucket index, or minute for 1-minute)
     int64_t session_ = INT64_MIN;
     size_t fills_seen_ = 0;
+    int64_t trade_from_ = INT64_MIN;
+    int tf_ = 1;
     std::vector<std::string>* log_ = nullptr;
     std::string error_, name_;
 };

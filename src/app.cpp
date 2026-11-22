@@ -247,7 +247,11 @@ bool start_strategy() {
     }
     if (g.strat_params.size() != d->params.size()) g.strat_params = default_params(*d);
     const Agg* a = d->timeframe > 1 ? &g.agg_for(d->timeframe) : nullptr;
-    if (!g.strat.start(g_scripts.L, *d, g.strat_params, &g.broker, &g.m, a, g.cursor, &g.broker.log)) {
+    // warm-up: the strategy sees its history up to the cursor, then trades from the next minute
+    size_t begin = d->warmup_days > 0 ? g.m.index_before(g.m.t[g.cursor] - static_cast<int64_t>(d->warmup_days) * 1440) : g.cursor;
+    bool ok = g.strat.start(g_scripts.L, *d, g.strat_params, &g.broker, &g.m, a, begin, &g.broker.log, g.m.t[g.cursor] + 1);
+    for (size_t k = begin + 1; ok && k <= g.cursor && g.strat.running(); ++k) g.strat.after_minute(k);
+    if (!ok || !g.strat.running()) {
         g.auto_trade = false;
         g.status = "strategy error: " + g.strat.error();
         return false;

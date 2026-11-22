@@ -53,6 +53,7 @@ struct ScriptDef {
     std::vector<FillDef> fills;
     // strategies
     int timeframe = 1;
+    int warmup_days = 0;               // history the strategy sees before it may trade
     int ref = -1;                      // registry reference to the definition table (in g_scripts.L)
 };
 

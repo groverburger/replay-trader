@@ -230,6 +230,9 @@ function __make_ctx(core)
   function ctx:date() return time.date(core.now()) end
   function ctx:rth() return time.is_rth(core.now() - 1) end
   function ctx:session() return time.session(core.now() - 1) end
+  function ctx:bar_end() return core.bar_end() end                -- end of the bar that just closed
+  function ctx:market_open_next() return core.open_next() end     -- trading continues right after it
+  function ctx:trading() return core.trading() end                -- false during warmup_days
 
   -- account
   function ctx:position() return (core.position()) end             -- signed contracts
@@ -240,12 +243,15 @@ function __make_ctx(core)
   function ctx:last() return core.last() end
 
   -- orders. opts: limit=price | stop=price (else market), stop_loss=points, take_profit=points (a bracket
-  -- attached when the entry fills). Returns the order id. Orders fill from the next minute on.
+  -- attached when the entry fills), slippage=points (market orders), fill="close" (market orders: fill at
+  -- the signal bar's close, as LEAN backtests do, instead of the next minute's open). Returns the order id,
+  -- or nil during warm-up. Orders fill from the next minute on.
   local function submit(side, qty, opts)
     opts = opts or {}
     local kind, price = "market", 0
     if opts.limit then kind, price = "limit", opts.limit elseif opts.stop then kind, price = "stop", opts.stop end
-    return core.submit(side, qty or 1, kind, price, opts.stop_loss or 0, opts.take_profit or 0)
+    return core.submit(side, qty or 1, kind, price, opts.stop_loss or 0, opts.take_profit or 0,
+                       opts.fill == "close", opts.slippage)
   end
   function ctx:buy(qty, opts) return submit(1, qty, opts) end
   function ctx:sell(qty, opts) return submit(-1, qty, opts) end

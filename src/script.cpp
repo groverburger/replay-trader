@@ -272,6 +272,7 @@ bool load_script(lua_State* L, ScriptDef& d) {
     d.overlay = get_bool(L, t, "overlay", true);
     d.zero_based = get_bool(L, t, "zero_based", false);
     d.timeframe = std::max(1, static_cast<int>(get_num(L, t, "timeframe", 1)));
+    d.warmup_days = std::max(0, static_cast<int>(get_num(L, t, "warmup_days", 0)));
     lua_getfield(L, t, "range");
     if (lua_istable(L, -1)) {
         lua_rawgeti(L, -1, 1), lua_rawgeti(L, -2, 2);
@@ -466,7 +467,10 @@ bool run_indicator(const ScriptDef& d, const Params& p, const Series& s, int tf,
 }
 
 // ---------------------------------------------------------------- host
-fs::path ScriptHost::user_dir() const { return data_dir() / "scripts"; }
+fs::path ScriptHost::user_dir() const {
+    if (const char* d = std::getenv("NQRT_SCRIPTS_DIR"); d && *d) return fs::path(d);  // another scripts folder
+    return data_dir() / "scripts";
+}
 
 bool ScriptHost::init(std::string& err) {
     L = new_script_state(err);

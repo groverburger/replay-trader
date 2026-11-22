@@ -27,6 +27,7 @@ struct Order {
     bool reduce_only = false;  // bracket legs: never open or flip a position
     double stop_pts = 0, target_pts = 0;  // bracket to attach when this order fills (0 = none)
     size_t born = 0;           // index of the bar that was last revealed when it was placed
+    double slip_pts = -1;      // market orders: slippage in points instead of the broker's (strategies)
 };
 
 struct Fill {
@@ -67,6 +68,9 @@ struct Broker {
     // Contract roll: raw prices jump by `delta`; shift the position and working orders to match.
     void roll(double delta, int64_t time);
     double unrealized(double last) const { return pos ? (last - avg) * pos * mult : 0; }
+    // Fills a market order right away at `price` (strategies filling at their signal bar's close, as LEAN
+    // backtests do). Returns the order id.
+    int fill_now(Order o, double price, int64_t time);
 
   private:
     int next_id_ = 1, next_oco_ = 1;

@@ -29,7 +29,10 @@ zooms in steps. With the patch:
 
 - **Trackpad input:** precise deltas reach `BK_scroll` as fractional notches. A notch is one wheel click, or 2
   widget units.
-- **Scroll regions:** they move by exact pixels.
+- **Scroll regions:** they move by exact pixels. A move re-arranges only that region, shifts the pixels already
+  drawn, and draws just the newly exposed strip and the scrollbar. Upstream relaid out and redrew the whole
+  window, chart included, for every pixel scrolled. A sidebar scroll frame went from 8–12 ms to about 1.3 ms
+  at Retina size, and the result was checked pixel-identical to a full redraw.
 - **Custom nodes:** they get fractional `wheel_x` and `wheel_y` values.
 - **Windows:** the host already sends touchpad fractions to `BK_scroll`, so it benefits too.
 

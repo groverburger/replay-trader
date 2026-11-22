@@ -549,8 +549,17 @@ void chart_draw(void*, BKNode*, BuiRaster* r, const int rect[4]) {
     Layout L = layout(static_cast<float>(rect[2]), static_cast<float>(rect[3]));
     Rgba region = theme("region_bg", {0.19f, 0.19f, 0.19f, 1}), text = theme("text", {0.9f, 0.9f, 0.9f, 1});
     Rgba plot_bg{region.r * 0.72f, region.g * 0.72f, region.b * 0.72f, 1}, grid = text.alpha(0.06f);
-    P.fill(0, 0, L.w, L.h, region);
-    if (g.s.n() == 0 || M.n != g.s.n()) return;  // not prepared for this series yet
+    if (g.s.n() == 0 || M.n != g.s.n() || L.panes.empty()) {  // not prepared for this series yet
+        P.fill(0, 0, L.w, L.h, region);
+        return;
+    }
+    // the background around the panes only: the panes paint their own (filling everything twice cost ~1 ms)
+    P.fill(0, 0, L.w, L.plot.y0, region);
+    P.fill(0, L.plot.y1, L.w, L.h - L.plot.y1, region);
+    P.fill(0, L.plot.y0, L.plot.x0, L.plot.h(), region);
+    P.fill(L.plot.x1, L.plot.y0, L.w - L.plot.x1, L.plot.h(), region);
+    for (size_t k = 1; k < L.panes.size(); ++k)  // gaps between panes
+        P.fill(L.plot.x0, L.panes[k - 1].box.y1, L.plot.w(), L.panes[k].box.y0 - L.panes[k - 1].box.y1, region);
 
     std::vector<double> xt = x_ticks(L);
     for (const Pane& pn : L.panes) {

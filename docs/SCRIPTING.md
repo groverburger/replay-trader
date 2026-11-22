@@ -113,6 +113,7 @@ return strategy {
   name = "Prior-bar breakout",
   description = "Buys a break of the prior 5-minute bar's high in an uptrend.",
   timeframe = 5,                        -- minutes per bar it sees (1 = every minute)
+  warmup_days = 0,                      -- history it sees before it may trade (orders are refused until then)
   params = {
     { "qty", 1, min = 1, max = 10 },
     { "stop", 15.0, min = 1, max = 100, step = 0.25, label = "Stop (pt)" },
@@ -147,8 +148,14 @@ return strategy {
 - `ctx:highest(n, k)` and `ctx:lowest(n, k)` return the extreme over `n` bars starting `k` bars back.
 - `ctx:bar_count()` returns the number of bars available.
 
-**Clock.** `ctx:now()` is the time the last minute closed. `ctx:hhmm()`, `ctx:date()`, `ctx:rth()` and
-`ctx:session()` are derived from it.
+**Clock.**
+
+- `ctx:now()` is the time the last minute closed. `ctx:hhmm()`, `ctx:date()`, `ctx:rth()` and `ctx:session()`
+  are derived from it.
+- `ctx:bar_end()` is the end time of the strategy bar that just closed.
+- `ctx:market_open_next()` is false when trading stops right after that bar: the daily break, weekends,
+  holidays and early closes.
+- `ctx:trading()` is false during `warmup_days`.
 
 **Account.**
 
@@ -160,11 +167,15 @@ return strategy {
 
 **Orders.** Each order call returns an order id.
 
-- `ctx:buy(qty, opts)` and `ctx:sell(qty, opts)` place an order:
+- `ctx:buy(qty, opts)` and `ctx:sell(qty, opts)` place an order. They return `nil` during the warm-up.
   - With no `opts`, it's a market order.
   - `opts.limit = price` makes it a limit order, and `opts.stop = price` a stop order.
   - `opts.stop_loss = points` and `opts.take_profit = points` attach a bracket when the entry fills. Its two
     legs cancel each other.
+  - `opts.slippage = points` sets a market order's slippage, instead of the ticket's.
+  - `opts.fill = "close"` fills a market order at the close of the bar that just closed, plus slippage,
+    instead of at the next minute's open. This is the QuantConnect/LEAN backtest convention. Use it to
+    reproduce results from there; the default is the more conservative choice.
 - `ctx:flatten()` cancels all orders and closes the position at market.
 - `ctx:cancel(id)`, `ctx:cancel_all()` and `ctx:modify(id, new_price)` manage working orders. Use `modify` to
   trail stops and move targets.

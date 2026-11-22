@@ -33,10 +33,11 @@ const char* type_name(OrderType t) { return t == OrderType::Market ? "market" : 
 
 // ---------------------------------------------------------------- run
 bool StrategyRun::start(lua_State* L, const ScriptDef& def, const Params& p, Broker* broker, const Market* m,
-                        const Agg* agg, size_t at, std::vector<std::string>* log) {
+                        const Agg* agg, size_t at, std::vector<std::string>* log, int64_t trade_from) {
     stop();
     error_.clear();
     L_ = L, b_ = broker, m_ = m, agg_ = def.timeframe > 1 ? agg : nullptr, log_ = log, name_ = def.name, i_ = at;
+    trade_from_ = trade_from, tf_ = def.timeframe;
     if (def.ref < 0) return fail(def.error.empty() ? "the strategy did not load" : def.error), false;
     lua_rawgeti(L, LUA_REGISTRYINDEX, def.ref);
     ref_ = luaL_ref(L, LUA_REGISTRYINDEX);  // our own reference: survives a script reload
@@ -50,7 +51,9 @@ bool StrategyRun::start(lua_State* L, const ScriptDef& def, const Params& p, Bro
         {"last", bound<&StrategyRun::last>},            {"submit", bound<&StrategyRun::submit>},
         {"cancel", bound<&StrategyRun::cancel>},        {"cancel_all", bound<&StrategyRun::cancel_all>},
         {"modify", bound<&StrategyRun::modify>},        {"orders", bound<&StrategyRun::orders>},
-        {"log", bound<&StrategyRun::log>},              {"point_value", bound<&StrategyRun::point_value>}};
+        {"log", bound<&StrategyRun::log>},              {"point_value", bound<&StrategyRun::point_value>},
+        {"trading", bound<&StrategyRun::is_trading>},   {"open_next", bound<&StrategyRun::open_next>},
+        {"bar_end", bound<&StrategyRun::bar_end>}};
     for (auto& [name, fn] : fns) {
         lua_pushlightuserdata(L, this);
         lua_pushcclosure(L, fn, 1);
@@ -184,6 +187,24 @@ int StrategyRun::now(lua_State* L) { return lua_pushinteger(L, m_->t[i_] + 1), 1
 int StrategyRun::last(lua_State* L) { return lua_pushnumber(L, m_->c[i_]), 1; }
 int StrategyRun::point_value(lua_State* L) { return lua_pushnumber(L, b_->mult), 1; }
 
+int StrategyRun::is_trading(lua_State* L) { return lua_pushboolean(L, trading()), 1; }
+
+// End of the last closed strategy bar (New York minutes).
+int StrategyRun::bar_end(lua_State* L) {
+    if (done_ < 0) return lua_pushnil(L), 1;
+    int64_t start = agg_ ? agg_->t[done_] : m_->t[done_];
+    return lua_pushinteger(L, tf_ >= 1440 ? m_->t[i_] + 1 : start + tf_), 1;
+}
+
+// Whether trading continues straight after the last closed bar (the exchange calendar: false before the
+// daily break, weekends, holidays and early closes).
+int StrategyRun::open_next(lua_State* L) {
+    if (done_ < 0 || i_ + 1 >= m_->size()) return lua_pushboolean(L, 0), 1;
+    int64_t start = agg_ ? agg_->t[done_] : m_->t[done_];
+    int64_t end = tf_ >= 1440 ? m_->t[i_] + 1 : start + tf_;
+    return lua_pushboolean(L, m_->t[i_ + 1] == end), 1;
+}
+
 int StrategyRun::position(lua_State* L) {
     lua_pushinteger(L, b_->pos);
     lua_pushnumber(L, b_->avg);
@@ -197,15 +218,24 @@ int StrategyRun::submit(lua_State* L) {
     int qty = static_cast<int>(luaL_checkinteger(L, 2));
     std::string kind = luaL_checkstring(L, 3);
     double price = luaL_optnumber(L, 4, 0), sl = luaL_optnumber(L, 5, 0), tp = luaL_optnumber(L, 6, 0);
+    bool at_close = lua_toboolean(L, 7);
+    double slip = luaL_optnumber(L, 8, -1);
     if (qty <= 0) return luaL_error(L, "order quantity must be at least 1");
+    if (!trading()) return lua_pushnil(L), 1;  // warm-up: no orders yet
     Order o;
-    o.side = side, o.qty = qty, o.born = i_;
+    o.side = side, o.qty = qty, o.born = i_, o.slip_pts = slip;
     o.type = kind == "limit" ? OrderType::Limit : kind == "stop" ? OrderType::Stop : OrderType::Market;
     if (o.type != OrderType::Market) {
         if (!(price > 0)) return luaL_error(L, "%s order needs a price", kind.c_str());
         o.price = std::round(price / kTick) * kTick;
     }
     o.stop_pts = std::max(0.0, sl), o.target_pts = std::max(0.0, tp);
+    if (at_close && o.type == OrderType::Market) {  // LEAN-style: at the signal bar's close, plus slippage
+        double s = slip >= 0 ? slip : b_->slip_ticks * kTick;
+        int64_t when = m_->t[i_] + 1;  // the bar's end, even when its last minute had no trades
+        if (agg_ && done_ >= 0 && tf_ < 1440) when = std::max(when, agg_->t[done_] + tf_);
+        return lua_pushinteger(L, b_->fill_now(o, m_->c[i_] + side * s, when)), 1;
+    }
     return lua_pushinteger(L, b_->submit(o)), 1;
 }
 
@@ -302,6 +332,8 @@ void Backtest::run(ScriptDef def, Params p, const Market* m, int64_t from, int64
         return finish();
     }
     r.params = script_label(L, def, p);
+    int64_t warm_from = from - static_cast<int64_t>(def.warmup_days) * 1440;
+    size_t iw = static_cast<size_t>(std::lower_bound(m->t.begin(), m->t.end(), warm_from) - m->t.begin());
     size_t i0 = static_cast<size_t>(std::lower_bound(m->t.begin(), m->t.end(), from) - m->t.begin());
     size_t i1 = static_cast<size_t>(std::lower_bound(m->t.begin(), m->t.end(), to) - m->t.begin());
     if (i1 <= i0 + 1) {
@@ -311,14 +343,17 @@ void Backtest::run(ScriptDef def, Params p, const Market* m, int64_t from, int64
     Agg agg;
     if (def.timeframe > 1) agg.build(*m, def.timeframe);
     StrategyRun run;
-    if (!run.start(L, def, p, &b, m, def.timeframe > 1 ? &agg : nullptr, i0, &r.log)) {
+    if (!run.start(L, def, p, &b, m, def.timeframe > 1 ? &agg : nullptr, iw, &r.log, from)) {
         r.error = run.error();
         return finish();
     }
+    for (size_t k = iw + 1; k <= i0 && k < m->size() && run.running() && !cancel_; ++k) run.after_minute(k);  // warm-up
     size_t i = i0 + 1;
     int gaps = 0;
     for (; i < i1 && !cancel_; ++i) {
-        if (b.pos != 0 && m->t[i] - m->t[i - 1] > 30 && ++gaps <= 50)  // early closes, holidays, data holes
+        int64_t gap_from = m->t[i - 1] + 1, gap_to = m->t[i];
+        bool usual = gap_from % 1440 == 17 * 60 && gap_to % 1440 == 18 * 60;  // the daily break, weekends
+        if (b.pos != 0 && gap_to - gap_from >= 30 && !usual && ++gaps <= 50)  // early closes, holidays, data holes
             r.log.push_back(clock(m->t[i - 1] + 1) + "  position held across a " + std::to_string(m->t[i] - m->t[i - 1] - 1) +
                             "-minute gap in the data (to " + clock(m->t[i]) + ")");
         float d = m->adj[i] - m->adj[i - 1];

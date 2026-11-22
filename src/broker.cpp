@@ -81,6 +81,13 @@ void Broker::fill(const Order& o, double price, int64_t time, const char* why) {
     }
 }
 
+int Broker::fill_now(Order o, double price, int64_t time) {
+    o.id = next_id_++;
+    o.type = OrderType::Market;
+    fill(o, price, time, "market");
+    return o.id;
+}
+
 bool Broker::on_bar(const Market& m, size_t i) {
     const double o = m.o[i], h = m.h[i], l = m.l[i], slip = slip_ticks * kTick;
     const int64_t t = m.t[i];
@@ -98,7 +105,7 @@ bool Broker::on_bar(const Market& m, size_t i) {
     for (size_t k = 0; k < orders.size(); ++k) {
         Order x = orders[k];
         if (x.type != OrderType::Market || !pending(x)) continue;
-        fill(x, o + x.side * slip, t, "market");
+        fill(x, o + x.side * (x.slip_pts >= 0 ? x.slip_pts : slip), t, "market");
         finish(x), any = true;
     }
     // 2. stops (including stops created by fills above), then 3. limits not created this bar
