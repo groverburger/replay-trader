@@ -7,6 +7,9 @@
 #include <ctime>
 #include <filesystem>
 
+#include "civil.h"
+#include "datafeed.h"
+
 const int kTfs[kNumTfs] = {1, 5, 15, 30, 60, 240, 1440};
 const char* kTfNames[kNumTfs] = {"1m", "5m", "15m", "30m", "1h", "4h", "1D"};
 const int kSpeeds[kNumSpeeds] = {1, 2, 5, 10, 30, 60, 120, 300, 600};
@@ -55,10 +58,15 @@ const Agg& App::agg() {
     return it->second;
 }
 
-std::string fmt_time(int64_t minutes, const char* f) {
-    time_t s = static_cast<time_t>(minutes) * 60;
+std::string fmt_time(int64_t minutes, const char* f) {  // times are naive New York local time
+    int64_t day = floor_div(minutes, 1440), tod = minutes - day * 1440;
+    int y, m, d;
+    civil_from_days(day, y, m, d);
     std::tm tm{};
-    gmtime_r(&s, &tm);  // times are naive New York local time
+    tm.tm_year = y - 1900, tm.tm_mon = m - 1, tm.tm_mday = d;
+    tm.tm_hour = static_cast<int>(tod / 60), tm.tm_min = static_cast<int>(tod % 60);
+    tm.tm_wday = weekday_of(day);
+    tm.tm_yday = static_cast<int>(day - days_from_civil(y, 1, 1));
     char buf[40];
     std::strftime(buf, sizeof buf, f, &tm);
     return buf;
@@ -113,12 +121,12 @@ void random_day() {
 }
 
 bool start_at(const char* date) {
-    std::tm tm{};
-    if (!strptime(date, "%Y-%m-%d %H:%M", &tm)) {
+    int64_t t;
+    if (!parse_minutes(date, t)) {
         g.status = "date format: YYYY-MM-DD HH:MM";
         return false;
     }
-    new_session(g.m.index_before(static_cast<int64_t>(timegm(&tm)) / 60), "new session");
+    new_session(g.m.index_before(t), "new session");
     return true;
 }
 
@@ -200,12 +208,14 @@ void reverse() {
 }
 
 void export_csv() {
-    std::filesystem::create_directories(RT_SESSIONS);
+    std::filesystem::path dir = data_dir() / "sessions";
+    std::error_code ec;
+    std::filesystem::create_directories(dir, ec);
     std::time_t now = std::time(nullptr);
     char name[64];
-    std::strftime(name, sizeof name, "/session_%Y%m%d_%H%M%S.csv", std::localtime(&now));
-    std::string path = std::string(RT_SESSIONS) + name;
-    FILE* f = std::fopen(path.c_str(), "w");
+    std::strftime(name, sizeof name, "session_%Y%m%d_%H%M%S.csv", std::localtime(&now));
+    std::string path = (dir / name).string();
+    FILE* f = open_file(dir / name, "w");
     if (!f) {
         g.status = "could not write " + path;
         return;

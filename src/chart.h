@@ -4,8 +4,9 @@
 
 struct BKNode;
 
-// Registers the chart font (a TrueType file); the UI font is used when it is missing.
-void chart_load_font(const char* path);
+// Registers the chart font: chart_font.ttf in the data folder, else the build machine's RT_FONT if there is one;
+// without either the chart uses the UI font (Inter).
+void chart_load_font();
 
 BKNode* chart_new();
 // Recomputes indicators and axis ranges for the current replay state; call before the chart is rendered.

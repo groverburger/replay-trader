@@ -2,6 +2,7 @@
 // tooltip, pan and zoom, order placement and dragging. Everything is in raster pixels.
 
 #include "chart.h"
+#include "datafeed.h"
 
 #include <algorithm>
 #include <climits>
@@ -651,8 +652,11 @@ void equity_draw(void*, BKNode*, BuiRaster* r, const int rect[4]) {
 static void equity_size();
 static BKNode* g_equity;
 
-void chart_load_font(const char* path) {
-    FILE* f = std::fopen(path, "rb");
+void chart_load_font() {
+    FILE* f = open_file(data_dir() / "chart_font.ttf", "rb");
+#ifdef RT_FONT
+    if (!f) f = std::fopen(RT_FONT, "rb");
+#endif
     if (!f) return;
     std::vector<char> data;
     char buf[65536];

@@ -1,0 +1,102 @@
+# Builds the macOS and Windows apps, smoke-tests them, and on a version tag (v*) attaches them to a GitHub release.
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build (universal .app)
+        run: |
+          cmake -S . -B build -DRT_DIST=ON
+          cmake --build build -j
+      - name: Smoke test
+        run: |
+          python3 tools/make_test_data.py test.bin
+          APP="build/NQ Replay Trader.app"
+          "$APP/Contents/MacOS/NQ Replay Trader" --data test.bin --demo --screenshot smoke-macos.bmp
+          lipo -info "$APP/Contents/MacOS/NQ Replay Trader"
+      - name: Package
+        run: |
+          APP="build/NQ Replay Trader.app"
+          codesign --force --deep -s - "$APP"
+          mkdir -p stage
+          ditto "$APP" "stage/NQ Replay Trader.app"
+          cp packaging/READ-ME-FIRST.txt stage/
+          git archive --format=zip --prefix=replay-trader-source/ -o stage/replay-trader-source.zip HEAD
+          (cd stage && zip -qry ../NQ-Replay-Trader-macOS.zip .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: macos
+          path: |
+            NQ-Replay-Trader-macOS.zip
+            smoke-macos.bmp
+
+  windows:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          install: >-
+            git zip
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-cmake
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-python
+      - name: Build (static .exe)
+        run: |
+          cmake -S . -B build -G Ninja -DRT_DIST=ON
+          cmake --build build
+      - name: Smoke test
+        run: |
+          python tools/make_test_data.py test.bin
+          ./build/NQReplayTrader.exe --data test.bin --demo --screenshot smoke-windows.bmp
+          test -s smoke-windows.bmp
+      - name: HTTPS check (a bad key must be rejected by the API)
+        continue-on-error: true
+        run: |
+          set +e
+          NQRT_DATA_DIR="$PWD/tmpdata" ./build/NQReplayTrader.exe --api-key not-a-real-key --from 2025-03-03 --screenshot x.bmp > http.log 2>&1
+          cat http.log
+          grep -q "rejected the key" http.log
+      - name: Package
+        run: |
+          mkdir -p stage
+          cp build/NQReplayTrader.exe packaging/READ-ME-FIRST.txt stage/
+          git archive --format=zip --prefix=replay-trader-source/ -o stage/replay-trader-source.zip HEAD
+          (cd stage && zip -qr ../NQ-Replay-Trader-Windows.zip .)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows
+          path: |
+            NQ-Replay-Trader-Windows.zip
+            smoke-windows.bmp
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [macos, windows]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            macos/NQ-Replay-Trader-macOS.zip
+            windows/NQ-Replay-Trader-Windows.zip
+          generate_release_notes: true
+          body: |
+            Download the zip for your system. First launch: see "Download" in the README (macOS: System Settings >
+            Privacy & Security > Open Anyway; Windows: More info > Run anyway). You need a karaiq Futures Data API key.

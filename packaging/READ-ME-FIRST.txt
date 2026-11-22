@@ -1,0 +1,41 @@
+NQ Replay Trader
+================
+
+Bar-by-bar replay of NQ futures 1-minute data with a paper broker. Nothing after the replay cursor is shown.
+
+You need your own API key for the karaiq Futures Data API (api.karaiq.com).
+
+Starting it
+-----------
+macOS:   Unzip and move "NQ Replay Trader.app" to Applications. The app isn't notarized by Apple, so the
+         first launch is refused once: open it, then go to System Settings > Privacy & Security and click
+         "Open Anyway" (on macOS 14 and earlier, right-click the app > Open also works). If macOS says the app
+         "is damaged", run:  xattr -dr com.apple.quarantine "/Applications/NQ Replay Trader.app"
+Windows: Unzip and run NQReplayTrader.exe. SmartScreen may say "Windows protected your PC": click
+         "More info" > "Run anyway". Windows 10 or later.
+
+First run
+---------
+Paste your API key and press "Download data". The full history (Dec 2009 to today, ~4,400 requests) takes
+about an hour because the API answers one request at a time. It downloads newest first, so you can press Stop
+after a few minutes, "Use cached data", and trade the recent months; the rest resumes the next time.
+Later starts only fetch the new days (a few seconds) and open the trader straight away.
+
+The key (if you tick "Remember") and the data (~150 MB) live in:
+  macOS:   ~/Library/Application Support/NQ Replay Trader/
+  Windows: %APPDATA%\NQ Replay Trader\
+Exported trade CSVs go to the "sessions" folder there. Delete the folder to remove everything.
+
+Command line (optional): --api-key KEY, --offline (use the cache, no network), --start "YYYY-MM-DD HH:MM",
+--demo. The NQ_API_KEY environment variable also works.
+
+Keys
+----
+Space play/pause, Right +1 minute, Shift+Right finish the chart bar, N jump to the next 09:30 open,
+Up/Down speed, B buy, S sell, X flatten, C cancel orders, L follow the latest bar.
+Cmd/Ctrl+click on the chart places a limit order, Shift+click a stop; drag order lines to move them.
+
+License
+-------
+Built with BUI (https://github.com/ppmpreetham/BUI), which is GPL-3.0-or-later, so this program is too.
+Its source is included as replay_trader-source.zip.

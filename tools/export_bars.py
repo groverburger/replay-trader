@@ -9,7 +9,7 @@ Layout (little endian): magic "NQ1M0001", int64 rows, then column arrays:
     float32 open, high, low, close, volume
     float32 adj        raw price minus back-adjusted price (changes only at rolls)
 
-Usage: python3 export_bars.py
+Usage: python3 tools/export_bars.py   (the app downloads its own data; this is only for --data)
 """
 
 from pathlib import Path
@@ -17,8 +17,8 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-HERE = Path(__file__).resolve().parent
-SRC = HERE.parent / "nq_research" / "data" / "nq_1min.parquet"
+HERE = Path(__file__).resolve().parent.parent  # the repo root
+SRC = HERE.parent / "nq_research" / "data" / "nq_1min.parquet"  # Team Safi research data, next to this repo
 
 
 def main():
