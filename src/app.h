@@ -76,6 +76,7 @@ struct App {
     Backtest bt;
     BacktestResult bt_result;
     int bt_seen = 0;            // bt.runs() whose result is in bt_result
+    bool bt_qc_rolls = false;   // backtest on QuantConnect's roll schedule
     std::mt19937 rng{std::random_device{}()};
 
     int tf() const { return kTfs[tf_idx]; }

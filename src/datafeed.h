@@ -42,6 +42,11 @@ CacheSummary cache_summary();
 // gets a line for each roll found by detection (rather than from the built-in table).
 bool load_cached_market(Market& m, std::string& err, std::vector<std::string>* notes = nullptr);
 
+// A copy of `m` that rolls on QuantConnect's schedule instead of the data's: between the API's splice and
+// QC's roll, prices are those of the contract QC still holds (shifted by the spread), and the position shift
+// happens at QC's roll. For reproducing QuantConnect backtests.
+Market qc_roll_schedule(const Market& m);
+
 class Downloader {
 public:
     ~Downloader() { stop(); }

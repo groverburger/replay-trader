@@ -218,6 +218,13 @@ These are the best starting points for your own:
 - **VWAP reversion:** fades closes beyond the VWAP bands with RSI confirmation. The target limit is moved to
   VWAP every bar, with a time stop and a daily loss limit.
 
+**QuantConnect roll schedule** (the backtest checkbox, or `--qc-rolls` on the command line). The data switches
+to the next quarterly contract about a week before expiry. QuantConnect's mapped contract rolls later: at the
+18:00 ET session on the Wednesday before the third-Friday expiry, a day earlier in Juneteenth weeks. With this
+option, backtests price the contract QuantConnect still holds between the two dates, and shift open positions
+at QuantConnect's roll. Combined with `fill = "close"`, it reproduces Team Safi's QuantConnect-validated engine
+trade for trade.
+
 Backtest results are hypothetical. They use 1-minute bars with conservative fill rules, so they still can't
 model queue position, partial fills or fast markets. Treat a good backtest as a reason to look closer, not as
 proof.

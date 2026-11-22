@@ -78,13 +78,16 @@ struct BacktestResult {
     BacktestStats stats;
     int64_t from = 0, to = 0;      // New York minutes actually covered
     std::string strategy, params;
+    bool qc_rolls = false;
 };
 
 class Backtest {
 public:
     ~Backtest() { cancel(); }
     // Runs `def` (by source, in a fresh Lua state) over [from, to) on a copy of the broker's settings.
-    void start(const ScriptDef& def, const Params& p, const Market* m, int64_t from, int64_t to, const Broker& settings);
+    // qc_rolls: on a copy of the data that rolls on QuantConnect's schedule (qc_roll_schedule).
+    void start(const ScriptDef& def, const Params& p, const Market* m, int64_t from, int64_t to, const Broker& settings,
+               bool qc_rolls = false);
     void cancel();
     bool running() const { return running_; }
     double progress() const { return progress_; }
@@ -93,7 +96,7 @@ public:
     void (*on_progress)() = nullptr;
 
 private:
-    void run(ScriptDef def, Params p, const Market* m, int64_t from, int64_t to, Broker b);
+    void run(ScriptDef def, Params p, const Market* m, int64_t from, int64_t to, Broker b, bool qc_rolls);
     std::thread th_;
     std::atomic<bool> running_{false}, cancel_{false};
     std::atomic<double> progress_{0};

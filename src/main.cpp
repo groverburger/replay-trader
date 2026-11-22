@@ -186,14 +186,14 @@ int run_backtest_cli(const char* id, const char* from_s, const char* to_s, const
         to += 1440;  // inclusive
     }
     auto t0 = std::chrono::steady_clock::now();
-    g.bt.start(*d, p, &g.m, from, to, g.broker);
+    g.bt.start(*d, p, &g.m, from, to, g.broker, g.bt_qc_rolls);
     while (g.bt.running()) std::this_thread::sleep_for(std::chrono::milliseconds(50));
     g.bt.cancel();
     BacktestResult r = g.bt.result();
     double secs = std::chrono::duration<double>(std::chrono::steady_clock::now() - t0).count();
     const BacktestStats& s = r.stats;
-    std::printf("%s  (%s to %s, %d sessions, %.1f s)\n", r.params.c_str(), fmt_time(r.from, "%Y-%m-%d").c_str(),
-                fmt_time(r.to, "%Y-%m-%d").c_str(), s.days, secs);
+    std::printf("%s  (%s to %s, %d sessions, %.1f s%s)\n", r.params.c_str(), fmt_time(r.from, "%Y-%m-%d").c_str(),
+                fmt_time(r.to, "%Y-%m-%d").c_str(), s.days, secs, r.qc_rolls ? ", QuantConnect roll schedule" : "");
     if (!r.error.empty()) std::printf("error: %s\n", r.error.c_str());
     int losses = s.trades - s.wins;
     std::printf("net $%.0f  trades %d  win %.1f%%  PF %.2f  avg win $%.0f  avg loss $%.0f  expectancy $%.1f\n", s.net, s.trades,
@@ -298,6 +298,7 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[a], "--bt-to") && a + 1 < argc) bt_to = argv[++a];
         else if (!std::strcmp(argv[a], "--set") && a + 1 < argc) bt_sets.push_back(argv[++a]);
         else if (!std::strcmp(argv[a], "--bt-csv") && a + 1 < argc) bt_csv = argv[++a];
+        else if (!std::strcmp(argv[a], "--qc-rolls")) g.bt_qc_rolls = true;
         else if (!std::strcmp(argv[a], "--list-rolls")) {  // the cached market's roll points, then exit
             std::string err;
             std::vector<std::string> notes;
@@ -318,7 +319,7 @@ int main(int argc, char** argv) {
             std::printf("usage: replay_trader [--api-key KEY] [--offline] [--data nq_1m.bin] [--start \"YYYY-MM-DD HH:MM\"]\n"
                         "                     [--screenshot out.bmp] [--demo]\n"
                         "       replay_trader --backtest STRATEGY [--bt-from YYYY-MM-DD] [--bt-to YYYY-MM-DD]\n"
-                        "                     [--set name=value ...] [--bt-csv trades.csv] [--data file | --offline]\n"
+                        "                     [--set name=value ...] [--bt-csv trades.csv] [--qc-rolls] [--data file | --offline]\n"
                         "API key: --api-key, NQ_API_KEY, or the one saved from the data screen.\n"
                         "Data folder: %s\n", data_dir().string().c_str());
             return 0;

@@ -48,6 +48,11 @@ and a time-limit hook stops runaway loops.
 - **Backtests** load the strategy into their own Lua state on a worker thread and run it on a private broker
   over the shared, read-only market. That takes about 0.1–0.4 s per year of 1-minute data.
 
+Backtests can run on `qc_roll_schedule(m)` (`src/datafeed.cpp`), a copy of the market that rolls on
+QuantConnect's schedule. That schedule was found empirically by Team Safi; the 2025-09 and 2025-12 spreads were
+measured from QuantConnect's own fills. With it, the Lua port of Team Safi's `live_strategy_1` matches their
+`fastbt`/`engine.py` on 100% of 1,936 trades for 2020–2025, with identical P&L.
+
 The Lua indicators were checked against the old C++ implementations on 1m, 5m and 1h series. They match to
 within 1e-11, with identical missing-value boundaries and identical pivots.
 

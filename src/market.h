@@ -12,6 +12,11 @@ struct Market {
     std::vector<int32_t> t;           // bar start
     std::vector<float> o, h, l, c, v;
     std::vector<float> adj;           // raw minus back-adjusted price; changes only at contract rolls
+    struct Roll {
+        int64_t t;                    // first bar on the new contract (the data's splice)
+        double jump;                  // new contract minus old, points
+    };
+    std::vector<Roll> rolls;          // from the roll table/detection; derived from adj for --data files
     size_t size() const { return t.size(); }
     bool load(const std::string& path, std::string& err);
     // Index of the last bar starting before `minute` (or 0).

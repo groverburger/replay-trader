@@ -393,9 +393,10 @@ void build_strategy(BKNode* body) {
             g.status = "backtest dates: YYYY-MM-DD";
             return;
         }
-        g.bt.start(*d, g.strat_params, &g.m, from, to + 1440, g.broker);  // "to" is inclusive
+        g.bt.start(*d, g.strat_params, &g.m, from, to + 1440, g.broker, g.bt_qc_rolls);  // "to" is inclusive
     });
     W.bt_stop = button(r, "Stop", "CANCEL", [] { g.bt.cancel(); });
+    check(body, "QuantConnect roll schedule", g.bt_qc_rolls, [](bool on) { g.bt_qc_rolls = on; });
     W.bt_bar = add(body, "progress");
     W.bt_summary = add(body, "column");
     BK_node_add(body, backtest_curve_new(), -1);

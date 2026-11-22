@@ -285,7 +285,8 @@ int StrategyRun::log(lua_State* L) {
 }
 
 // ---------------------------------------------------------------- backtest
-void Backtest::start(const ScriptDef& def, const Params& p, const Market* m, int64_t from, int64_t to, const Broker& settings) {
+void Backtest::start(const ScriptDef& def, const Params& p, const Market* m, int64_t from, int64_t to, const Broker& settings,
+                     bool qc_rolls) {
     cancel();
     Broker b;
     b.mult = settings.mult, b.commission = settings.commission, b.slip_ticks = settings.slip_ticks;
@@ -298,7 +299,7 @@ void Backtest::start(const ScriptDef& def, const Params& p, const Market* m, int
     ++runs_;
     ScriptDef copy = def;
     copy.ref = -1;
-    th_ = std::thread(&Backtest::run, this, copy, p, m, from, to, b);
+    th_ = std::thread(&Backtest::run, this, copy, p, m, from, to, b, qc_rolls);
 }
 
 void Backtest::cancel() {
@@ -312,9 +313,15 @@ BacktestResult Backtest::result() const {
     return result_;
 }
 
-void Backtest::run(ScriptDef def, Params p, const Market* m, int64_t from, int64_t to, Broker b) {
+void Backtest::run(ScriptDef def, Params p, const Market* m, int64_t from, int64_t to, Broker b, bool qc_rolls) {
     BacktestResult r;
     r.strategy = def.name;
+    r.qc_rolls = qc_rolls;
+    Market qc;
+    if (qc_rolls) {
+        qc = qc_roll_schedule(*m);
+        m = &qc;
+    }
     std::string err;
     lua_State* L = new_script_state(err);
     set_script_sink(L, &r.log);

@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cstring>
+#include <map>
 #include <set>
 
 #include "civil.h"
@@ -275,6 +276,8 @@ void apply_rolls(Market& m, std::vector<std::string>* notes) {
     }
     // adj = traded price minus back-adjusted price: 0 on the newest contract, and before each splice the bars
     // were on an older contract, priced `jump` below the back-adjusted series.
+    m.rolls.clear();
+    for (const RollAt& r : rolls) m.rolls.push_back({r.t, r.jump});
     for (const RollAt& r : rolls) {
         size_t i = static_cast<size_t>(std::lower_bound(m.t.begin(), m.t.end(), r.t) - m.t.begin());
         for (size_t k = 0; k < i && k < m.size(); ++k) m.adj[k] -= static_cast<float>(r.jump);
@@ -282,6 +285,49 @@ void apply_rolls(Market& m, std::vector<std::string>* notes) {
 }
 
 }  // namespace
+
+// ---------------------------------------------------------------- QuantConnect's roll schedule
+// QuantConnect's mapped NQ contract rolls at the session opening 18:00 ET on the Wednesday before the
+// third-Friday expiry (a day earlier in Juneteenth weeks): found empirically by Team Safi against QC
+// backtests (local_backtester/rolls.py). The API rolls days earlier, so between the two QC still holds
+// the old contract. These spreads were measured from QC's own fills where the API splices mid-bar.
+static int64_t qc_roll_minute(int y, int mo) {
+    int64_t d15 = days_from_civil(y, mo, 15);
+    int64_t friday = d15 + ((5 - weekday_of(d15)) + 7) % 7;  // weekday_of: 0 = Sunday, so Friday = 5
+    int64_t wed = friday - 2;
+    int64_t june19 = days_from_civil(y, 6, 19);
+    if (june19 >= wed && june19 <= wed + 2) wed -= 1;
+    return wed * 1440 + 18 * 60;
+}
+
+Market qc_roll_schedule(const Market& src) {
+    Market m = src;
+    std::vector<Market::Roll> rolls = src.rolls;
+    if (rolls.empty())  // a --data file: the rolls are where adj steps
+        for (size_t i = 1; i < src.size(); ++i)
+            if (src.adj[i] != src.adj[i - 1]) rolls.push_back({src.t[i], src.adj[i] - src.adj[i - 1]});
+    static const std::map<std::string, double> qc_spread = {{"2025-09", 228.75}, {"2025-12", 257.75}};
+    std::fill(m.adj.begin(), m.adj.end(), 0.0f);
+    m.rolls.clear();
+    for (const Market::Roll& r : rolls) {
+        int y, mo, d;
+        civil_from_days(floor_div(r.t, 1440), y, mo, d);
+        char key[16];
+        std::snprintf(key, sizeof key, "%04d-%02d", y, mo);
+        auto ov = qc_spread.find(key);
+        double jump = ov != qc_spread.end() ? ov->second : r.jump;
+        int64_t qt = qc_roll_minute(y, mo);
+        size_t i = static_cast<size_t>(std::lower_bound(m.t.begin(), m.t.end(), r.t) - m.t.begin());
+        size_t j = static_cast<size_t>(std::lower_bound(m.t.begin(), m.t.end(), qt) - m.t.begin());
+        // between the data's splice and QC's roll, price the contract QC holds
+        size_t a = std::min(i, j), b = std::max(i, j);
+        float shift = static_cast<float>(j > i ? -jump : jump);
+        for (size_t k = a; k < b; ++k) m.o[k] += shift, m.h[k] += shift, m.l[k] += shift, m.c[k] += shift;
+        for (size_t k = 0; k < j; ++k) m.adj[k] -= static_cast<float>(jump);  // the jump now happens at QC's roll
+        m.rolls.push_back({qt, jump});
+    }
+    return m;
+}
 
 // ---------------------------------------------------------------- files and keys
 fs::path data_dir() {
