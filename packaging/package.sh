@@ -2,7 +2,7 @@
 # Builds the shareable apps into dist/:
 #   dist/Replay-Trader-macOS.zip    universal .app (Apple Silicon + Intel), ad-hoc signed
 #   dist/Replay-Trader-Windows.zip  ReplayTrader.exe (x64, static), cross-compiled with mingw-w64
-# Each zip also holds READ-ME-FIRST.txt and the source (BUI is GPL-3.0, so the app is too and ships with source).
+# Each zip also holds READ-ME-FIRST.txt and the source (the app is GPL-3.0-or-later and ships with its source).
 # Needs: cmake, Xcode command line tools, and for Windows `brew install mingw-w64`.
 set -eu
 cd "$(dirname "$0")/.."

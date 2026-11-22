@@ -37,5 +37,5 @@ Cmd/Ctrl+click on the chart places a limit order, Shift+click a stop; drag order
 
 License
 -------
-Built with BUI (https://github.com/ppmpreetham/BUI), which is GPL-3.0-or-later, so this program is too.
-Its source is included as replay_trader-source.zip.
+GPL-3.0-or-later. Its source is included as replay_trader-source.zip. It uses Dear ImGui (MIT), GLFW (zlib),
+Lua (MIT) and the Inter font (SIL Open Font License 1.1, https://github.com/rsms/inter).

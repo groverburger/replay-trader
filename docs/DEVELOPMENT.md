@@ -4,40 +4,54 @@
 
 | File | What it does |
 |---|---|
-| `src/main.cpp` | Startup: options, API key, data screen or trader, window loop, headless screenshots |
+| `src/main.cpp` | Startup: options, API key, data screen or trader, fonts and theme, window loop, frame timing, headless screenshots |
 | `src/setup.cpp` | The data screen (API key, download progress, cached-data fallback) |
 | `src/datafeed.cpp` | API client, per-month cache, building the market, contract rolls |
 | `src/http.cpp` | HTTPS GET: libcurl on macOS/Linux, WinHTTP on Windows |
 | `src/market.cpp` | 1-minute bars, aggregation into chart timeframes, the partly revealed bar |
 | `src/broker.cpp` | Paper broker: orders, fills, brackets, P&L, roll shifts |
 | `src/app.cpp` | Replay state and actions shared by the panels and the chart |
-| `src/panels.cpp` | Left-hand panels (BUI widget tree) |
-| `src/chart.cpp` | Price chart, oscillator panes and equity curve (custom-drawn BUI nodes) |
+| `src/panels.cpp` | Left-hand panels, number fields, smooth scrolling |
+| `src/chart.cpp` | Price chart, oscillator panes and equity curves (ImGui draw lists), pan / zoom / order input |
+| `src/softraster.cpp` | CPU rasterizer for ImGui draw data (`--screenshot` without a window or GPU) |
+| `src/mac_metal.mm`, `src/mac_input.m` | macOS: the Metal renderer; telling trackpad scrolling from wheel clicks |
 | `src/civil.h` | Calendar arithmetic without libc time functions (they differ across platforms) |
 | `src/script.cpp` | Lua: script discovery and hot reload, definitions, params, running indicators |
 | `src/strategy.cpp` | Strategies: the `ctx` bindings, minute-by-minute driving, backtests on a worker thread, stats |
 | `scripts/lib/prelude.lua` | The Lua side of the API: `indicator`/`strategy`, `time`, `ta`, the `ctx` methods |
 | `scripts/indicators/`, `scripts/strategies/` | Built-in scripts, compiled into the binary (`cmake/embed_files.cmake`) |
 
-The UI is [BUI](https://github.com/ppmpreetham/BUI) v0.5.0, Blender's interface as a C library. On macOS it
-draws on the CPU and only redraws what changed, so an idle window uses no CPU. The chart therefore invalidates
-itself only when something it draws has changed (`chart_prepare` keeps a signature), not on every frame.
+The UI is [Dear ImGui](https://github.com/ocornut/imgui) 1.91.9b on [GLFW](https://www.glfw.org) 3.4, rebuilt
+every frame from the app state (immediate mode). It renders on the GPU: Metal on macOS (a `CAMetalLayer`, which
+presents at the display's rate, 120 Hz on ProMotion; OpenGL on macOS doesn't pace to ProMotion), OpenGL 3
+elsewhere, with an OpenGL 2 fallback for old drivers and VMs. Text is Inter 4.0 (embedded), rasterized at the
+display's pixel density.
 
-**Scrolling patch.** `packaging/bui/precise-scroll.patch` is applied to BUI at fetch time. Upstream, the macOS
-host rounds trackpad scrolling to whole wheel notches, so scroll regions jump about 40 px at a time and the chart
-zooms in steps. With the patch:
+**Frames.** The loop sleeps in `glfwWaitEventsTimeout` while nothing changes, so an idle window draws nothing. Input
+draws a few frames (ImGui settles hover and clicks over two); playback, zoom and pan easing, smooth scrolling and
+the price axis easing keep frames coming at the display's rate (`keep_animating`); the downloader and backtests
+wake the loop from their threads with `glfwPostEmptyEvent`. User scripts are checked once a second.
 
-- **Trackpad input:** precise deltas reach `BK_scroll` as fractional notches. A notch is one wheel click, or 2
-  widget units.
-- **Scroll regions:** they move by exact pixels. A move re-arranges only that region, shifts the pixels already
-  drawn, and draws just the newly exposed strip and the scrollbar. Upstream relaid out and redrew the whole
-  window, chart included, for every pixel scrolled. A sidebar scroll frame went from 8–12 ms to about 1.3 ms
-  at Retina size, and the result was checked pixel-identical to a full redraw.
-- **Custom nodes:** they get fractional `wheel_x` and `wheel_y` values.
-- **Windows:** the host already sends touchpad fractions to `BK_scroll`, so it benefits too.
+**Scrolling.** GLFW gives the scroll callback a trackpad's precise deltas (on macOS, pixels times 0.1;
+`mac_input.m` tells them from wheel clicks, which arrive as lines) and Windows touchpads' fractions of a notch.
+`ScrollEvent`s are in interface units; a wheel click is 40 units.
 
-Mouse wheels are unchanged. The chart pans 1:1 with the fingers and zooms continuously on a trackpad, and eases
-whole mouse-wheel notches.
+- **Sidebar and trade list** (`begin_smooth_child`): trackpad deltas move them 1:1 with the fingers, wheel clicks
+  glide. The position is kept as a float, so slow swipes don't get lost in ImGui's whole-unit scroll rounding.
+- **Chart:** sideways scrolling pans 1:1, vertical scrolling zooms continuously; wheel clicks ease (Shift turns a
+  wheel sideways).
+- ImGui's own scrolling (dropdown lists) gets the same deltas, scaled so it also moves 1:1.
+
+**Frame times** at Retina size (3200 x 1900 px, M-series MacBook Pro, ProMotion), from `RT_BENCH`, which feeds
+synthetic scroll input through the same path as the trackpad: building and encoding a frame takes 0.2–0.3 ms on
+average (p95 under 1 ms) for chart panning, zooming, wheel zooming and sidebar scrolling, and frames arrive every
+8.3 ms (120 Hz). The BUI version took about 7 ms to draw a chart pan or zoom frame on the CPU plus about 3 ms to
+present it (about 75 fps).
+
+| Variable | Effect |
+|---|---|
+| `RT_FRAME_LOG=1` | Log every frame's CPU time, presentation wait and interval to stderr, with a summary on exit |
+| `RT_BENCH=pan`, `zoom`, `wheel`, `scroll`, `scrollwheel` | Replay 4 s of synthetic scrolling over the chart or the sidebar in the real window, print frame-time statistics and quit |
 
 **Scripting.** Each script runs in its own environment on top of the prelude. Scripts get no file or OS access,
 and a time-limit hook stops runaway loops.
@@ -95,17 +109,28 @@ current cache produces.
 
 | Option | Effect |
 |---|---|
-| `--screenshot out.bmp` | Render off-screen and exit (`BUI_UI_SCALE=2` for Retina size). It downloads first if there's a key |
+| `--screenshot out.bmp` | Render off-screen on the CPU and exit: no window or GPU needed (`RT_UI_SCALE=2` for Retina size, `RT_SHOT_SIZE=850x500` for another size). It downloads first if there's a key |
 | `--show-setup` | With `--screenshot`, render the data screen instead |
+| `--show-strategy` | The opening range breakout trading the replay, with a 2025 backtest and the sidebar scrolled to the Strategy panel (`docs/strategy.png`) |
 | `--from YYYY-MM-DD` | Download only from that day (for testing the downloader) |
 | `--data file.bin` | Load a file in the `NQ1M0001` format instead of the cache (`tools/export_bars.py`, CI's `tools/make_test_data.py`) |
 | `--list-rolls` | Print the cached market's roll points and exit |
+
+The screenshots in `docs/` come from the `RT_DIST` build (so the chart uses Inter), off-screen at 2x:
+
+```sh
+APP="build-mac/Replay Trader.app/Contents/MacOS/Replay Trader"; D=data/nq_1m.bin
+RT_UI_SCALE=2 "$APP" --data $D --start "2025-04-09 09:25" --demo --screenshot trader.bmp
+RT_UI_SCALE=2 "$APP" --data $D --start "2025-06-05 09:25" --show-strategy --screenshot strategy.bmp
+HOME=/Users/you RT_SHOT_SIZE=850x500 RT_UI_SCALE=2 "$APP" --show-setup --screenshot data-screen.bmp
+sips -s format png trader.bmp --out docs/trader.png   # and so on
+```
 
 ## Releases
 
 `.github/workflows/release.yml` runs on version tags (`v*`) and on manual dispatch:
 
-- **macOS** (macos-14): universal `.app`, ad-hoc signed.
+- **macOS** (macos-15): universal `.app`, ad-hoc signed.
 - **Windows** (MSYS2 MinGW-w64): a static `.exe`.
 
 Each build is smoke-tested by rendering a screenshot from synthetic data. The Windows job also checks that a bad
@@ -118,4 +143,4 @@ described in the README.
 
 The local developer build loads a chart font from `../strategy_report/pdf_src/fonts/` if it exists. That font
 isn't redistributable, so it is never in an `RT_DIST` build. Users can drop any `chart_font.ttf` into the data
-folder; otherwise the chart uses the UI font.
+folder; otherwise the chart uses the UI font (Inter).

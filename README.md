@@ -89,8 +89,8 @@ fill against the next revealed minute:
 
 When a bracket's stop and target are both hit inside one minute, it counts as stopped out.
 
-Times are New York time. Fields work like Blender's: drag a number to scrub it, or click and type an expression
-such as `20*1.5`.
+Times are New York time. Number fields work like Blender's: drag one to scrub it, or click it and type a value or
+an expression such as `20*1.5` (Enter applies, Esc cancels).
 
 **Command line (optional).** Options are `--api-key KEY` (or set `NQ_API_KEY`), `--offline` to use the
 downloaded data without connecting, `--start "2025-04-09 09:25"` and `--demo`.
@@ -130,8 +130,9 @@ few gaps, which the backtest log points out.
 ## Building from source
 
 You need CMake 3.20 or later and a C++17 compiler: Xcode command line tools on macOS, or MSVC or MinGW-w64 on
-Windows. The UI library, [BUI](https://github.com/ppmpreetham/BUI), and Lua 5.4 are downloaded and built
-automatically.
+Windows. [Dear ImGui](https://github.com/ocornut/imgui), [GLFW](https://www.glfw.org), Lua 5.4 and the
+[Inter](https://rsms.me/inter/) font are downloaded and built automatically. The interface draws on the GPU: Metal
+on macOS, OpenGL on Windows.
 
 ```sh
 cmake -S . -B build && cmake --build build -j
@@ -145,7 +146,7 @@ one. Pushing a tag such as `v1.0.0` builds both on GitHub Actions and attaches t
 
 ## License
 
-GPL-3.0-or-later (see [LICENSE](LICENSE)). The interface is built with BUI, a C library of Blender's widgets,
-which is GPL-3.0.
+GPL-3.0-or-later (see [LICENSE](LICENSE)). It uses Dear ImGui (MIT), GLFW (zlib), Lua (MIT) and the Inter font
+(SIL Open Font License 1.1).
 
 This is a practice tool, not investment advice. Past market data says nothing reliable about future results.
