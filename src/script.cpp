@@ -245,6 +245,10 @@ bool call_script(lua_State* L, int nargs, int nresults, std::string& err) {
 
 bool load_script(lua_State* L, ScriptDef& d) {
     int top = lua_gettop(L);
+    // a definition can be loaded again (backtests load a copy into their own state): start from scratch,
+    // or the params/plots would be appended twice and the second, default copy would win
+    d.params.clear(), d.plots.clear(), d.fills.clear(), d.levels.clear();
+    d.error.clear(), d.has_range = false, d.ref = -1;
     auto fail = [&](const std::string& e) {
         d.error = e;
         lua_settop(L, top);
