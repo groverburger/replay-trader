@@ -212,21 +212,20 @@ Create these once, in `init`, then call `:update(...)` once per bar. Each return
 
 ### Built-in strategies
 
-These are the best starting points for your own:
+Four strategies with tested results. Each buys after a short-term decline and holds for one to a few sessions.
+All passed a 2010-2018 training period, a 2019-2022 test period and a held-out test on ES (S&P 500 futures),
+after taker costs:
 
-- **Opening range breakout:** stop entries on either side of the opening range, one-cancels-the-other on fill,
-  a bracket sized to the range, a breakeven stop and a cut-off time.
-- **EMA trend (5m):** runs on 5-minute bars, with a trend filter, an ATR trailing (chandelier) stop managed
-  through `modify`, an exit on the opposite cross and a cap on trades per day.
-- **VWAP reversion:** fades closes beyond the VWAP bands with RSI confirmation. The target limit is moved to
-  VWAP every bar, with a time stop and a daily loss limit.
+| Strategy | Rule | ES 2010-2026 Sharpe |
+|---|---|---|
+| Selloff absorption | session down at least 1 ATR20 from its open: buy the close, sell the next close | 0.68 |
+| RSI(2) oversold | RSI(2) below 10: buy the close, sell the first close above the 5-session average | 0.81 |
+| IBS reversion | close in the bottom 20% of the day's range: buy, sell the next close | 0.58 |
+| Double seven | above the 200-session average, a 7-session closing low: buy; sell a 7-session closing high | 0.68 |
 
-**QuantConnect roll schedule** (the backtest checkbox, or `--qc-rolls` on the command line). The data switches
-to the next quarterly contract about a week before expiry. QuantConnect's mapped contract rolls later: at the
-18:00 ET session on the Wednesday before the third-Friday expiry, a day earlier in Juneteenth weeks. With this
-option, backtests price the contract QuantConnect still holds between the two dates, and shift open positions
-at QuantConnect's roll. Combined with `fill = "close"`, it reproduces a QuantConnect-validated reference engine
-trade for trade.
+They are long only and partly overlap. Three API examples show other features and have no tested edge:
+opening range breakout (stop entries, brackets, breakeven stop), EMA trend (5-minute bars, trailing stop via
+`modify`) and VWAP reversion (moving target, time stop, daily loss limit).
 
 Backtest results are hypothetical. They use 1-minute bars with conservative fill rules, so they still can't
 model queue position, partial fills or fast markets. Treat a good backtest as a reason to look closer, not as

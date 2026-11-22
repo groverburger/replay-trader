@@ -6,7 +6,7 @@
 -- stop moves to the entry. No new entries after `last_entry`; everything is flat by 15:55.
 return strategy {
   name = "Opening range breakout",
-  description = "Stop entries on a break of the opening range; range stop, R target, breakeven, flat by 15:55.",
+  description = "API example (no tested edge): stop entries on both sides of the opening range, bracket, breakeven stop.",
   timeframe = 1,
   params = {
     { "range_minutes", 15, min = 5, max = 120, label = "Range (min)" },

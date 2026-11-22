@@ -5,7 +5,7 @@
 -- since entry (a chandelier stop); an opposite cross also exits. At most `max_trades` per day; flat by 15:55.
 return strategy {
   name = "EMA trend (5m)",
-  description = "Fast/slow EMA cross with a trend filter, ATR chandelier trailing stop, flat by 15:55.",
+  description = "API example (no tested edge): 5-minute EMA cross, trend filter, ATR trailing stop, flat by 15:55.",
   timeframe = 5,
   params = {
     { "fast", 9, min = 2, max = 100 },

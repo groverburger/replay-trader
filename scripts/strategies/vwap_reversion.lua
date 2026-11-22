@@ -6,7 +6,7 @@
 -- after a closed loss of `daily_loss` dollars. Entries 10:00-15:00 only; flat by 15:55.
 return strategy {
   name = "VWAP reversion",
-  description = "Fades closes beyond the VWAP bands with RSI confirmation; target VWAP, ATR stop, daily loss limit.",
+  description = "API example (no tested edge): fades VWAP-band extremes; target follows VWAP; daily loss limit.",
   timeframe = 1,
   params = {
     { "band", 2.0, min = 0.5, max = 4, step = 0.25, label = "Band (sd)" },
