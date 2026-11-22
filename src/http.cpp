@@ -21,10 +21,10 @@ std::string last_error(const char* what) { return std::string(what) + " failed (
 void http_global_init() {}
 
 Http::Http() {
-    h_ = WinHttpOpen(L"nq-replay-trader/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
+    h_ = WinHttpOpen(L"replay-trader/1.0", WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY, WINHTTP_NO_PROXY_NAME,
                      WINHTTP_NO_PROXY_BYPASS, 0);
     if (!h_)  // AUTOMATIC_PROXY needs Windows 8.1+
-        h_ = WinHttpOpen(L"nq-replay-trader/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
+        h_ = WinHttpOpen(L"replay-trader/1.0", WINHTTP_ACCESS_TYPE_DEFAULT_PROXY, WINHTTP_NO_PROXY_NAME,
                          WINHTTP_NO_PROXY_BYPASS, 0);
     if (h_) WinHttpSetTimeouts(h_, 30000, 30000, 120000, 120000);
 }
@@ -107,7 +107,7 @@ HttpResult Http::get(const std::string& host, const std::string& path, const std
     curl_easy_setopt(c, CURLOPT_HTTPHEADER, hdrs);
     curl_easy_setopt(c, CURLOPT_WRITEFUNCTION, on_data);
     curl_easy_setopt(c, CURLOPT_WRITEDATA, &r.body);
-    curl_easy_setopt(c, CURLOPT_USERAGENT, "nq-replay-trader/1.0");
+    curl_easy_setopt(c, CURLOPT_USERAGENT, "replay-trader/1.0");
     curl_easy_setopt(c, CURLOPT_CONNECTTIMEOUT, 30L);
     curl_easy_setopt(c, CURLOPT_TIMEOUT, 120L);
     curl_easy_setopt(c, CURLOPT_NOSIGNAL, 1L);  // timeouts from worker threads

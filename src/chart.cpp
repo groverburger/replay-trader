@@ -568,21 +568,50 @@ void clamp_view() {
     g.xmax = g.xmin + span;
 }
 
-void zoom(const Layout& L, double factor, float anchor_px) {
-    // following, xmin/xmax are only recomputed next frame: several notches in one frame must compound
-    double base = g.follow ? g.visible : g.xmax - g.xmin;
-    double span = std::clamp(base * factor, kMinSpan, kMaxSpan);
-    g.visible = static_cast<int>(std::lround(span));
-    if (g.follow) return;  // following: the right edge stays on the latest bar (update_view)
-    double ax = L.xval(anchor_px), t = (ax - g.xmin) / (g.xmax - g.xmin);  // keep the bar under the pointer
-    g.xmin = ax - t * span, g.xmax = g.xmin + span;
+// Zoom eases toward a target span, in log space, so wheel notches (whole steps, several per frame from a
+// trackpad) become one continuous motion. The bar under the pointer stays put; when following, the right edge
+// stays on the latest bar instead.
+struct ZoomAnim {
+    bool on = false;
+    double target = 0;         // span we're heading for
+    double anchor_x = 0;       // bar under the pointer when the gesture last moved
+    double anchor_frac = 1;    // ... and where it sits across the plot (0 left, 1 right)
+} Z;
+
+double current_span() { return g.follow ? g.visible : g.xmax - g.xmin; }
+
+void set_span(double span) {
+    if (g.follow) {
+        g.visible = span;  // update_view places xmin/xmax
+        return;
+    }
+    g.visible = span;
+    g.xmin = Z.anchor_x - Z.anchor_frac * span, g.xmax = g.xmin + span;
     clamp_view();
 }
 
-void pan(double bars) {
+void zoom(const Layout& L, double factor, float anchor_px) {
+    if (!Z.on) Z.target = current_span();
+    Z.target = std::clamp(Z.target * factor, kMinSpan, kMaxSpan);
+    Z.anchor_frac = std::clamp((anchor_px - L.plot.x0) / L.plot.w(), 0.0f, 1.0f);
+    Z.anchor_x = g.xmin + Z.anchor_frac * (g.xmax - g.xmin);
+    Z.on = true;
+}
+
+double g_pan_left = 0;  // bars of a wheel pan still to glide through
+
+void pan_now(double bars) {
     g.follow = false;
+    double before = g.xmin;
     g.xmin += bars, g.xmax += bars;
     clamp_view();
+    Z.anchor_x += g.xmin - before;  // a zoom easing at the same time (diagonal swipe) keeps the pan
+}
+
+void pan(double bars) {  // wheel / trackpad: eased like the zoom
+    if (g.follow) Z.on = false;  // leaving follow mode: the zoom anchor below is about to move
+    g.follow = false;
+    g_pan_left += bars;
 }
 
 int chart_event(void*, BKNode* node, const BKCustomEvent* e) {
@@ -614,6 +643,7 @@ int chart_event(void*, BKNode* node, const BKCustomEvent* e) {
                 double dx = (e->x - C.press_x) / L.ppb();
                 if (g.follow && std::fabs(e->x - C.press_x) < 3) break;
                 g.follow = false;
+                Z.on = false, g_pan_left = 0;
                 g.xmin = C.xmin0 - dx, g.xmax = C.xmax0 - dx;
                 clamp_view();
             }
@@ -696,6 +726,37 @@ BKNode* chart_new() {
     return n;
 }
 
+// Price-axis easing: the fitted range jumps whenever a high or low scrolls in or out of view; the axis glides
+// there instead. It snaps on a new session, a timeframe change or the first frame.
+struct AxisAnim {
+    bool init = false, moving = false;
+    double lo = 0, hi = 1;
+    int tf = -1;
+    size_t cursor = 0;
+    double dt = 0;
+} Y;
+
+bool chart_animate(double dt) {
+    Y.dt = dt;
+    if (Z.on) {
+        double cur = current_span(), a = 1 - std::exp(-dt * 22.0);  // ~90% of the way in 0.1 s
+        double next = std::exp(std::log(cur) + (std::log(Z.target) - std::log(cur)) * a);
+        if (std::fabs(std::log(Z.target / next)) < 0.002) next = Z.target, Z.on = false;
+        set_span(next);
+    }
+    if (g_pan_left != 0) {
+        double step = g_pan_left * (1 - std::exp(-dt * 22.0));
+        if (std::fabs(g_pan_left - step) < 0.01) step = g_pan_left;
+        g_pan_left -= step;
+        double before = g.xmin;
+        pan_now(step);
+        if (g.xmin == before) g_pan_left = 0;  // against the end of the data
+    }
+    return chart_animating();
+}
+
+bool chart_animating() { return Z.on || Y.moving || g_pan_left != 0; }
+
 void chart_prepare() {
     update_view();
     const Series& s = g.s;
@@ -706,6 +767,17 @@ void chart_prepare() {
     fit(price.ymin, price.ymax, {&s.l, &s.h}, 0.0);
     double pad = std::max((price.ymax - price.ymin) * 0.08, 2.0);
     price.ymin -= pad, price.ymax += pad;
+    bool jump = g.cursor + 1 < Y.cursor || g.cursor > Y.cursor + 2000;  // new session / start here
+    if (!Y.init || Y.tf != g.tf() || jump || Y.dt <= 0) {
+        Y.lo = price.ymin, Y.hi = price.ymax, Y.moving = false;
+    } else {
+        double a = 1 - std::exp(-Y.dt * 16.0), range = price.ymax - price.ymin;
+        Y.lo += (price.ymin - Y.lo) * a, Y.hi += (price.ymax - Y.hi) * a;
+        Y.moving = std::fabs(Y.lo - price.ymin) + std::fabs(Y.hi - price.ymax) > range * 0.002;
+        if (!Y.moving) Y.lo = price.ymin, Y.hi = price.ymax;
+    }
+    Y.init = true, Y.tf = g.tf(), Y.cursor = g.cursor, Y.dt = 0;
+    price.ymin = Y.lo, price.ymax = Y.hi;
     M.panes.push_back(price);
     for (const Ind& d : g.inds) {
         if (!d.on) continue;

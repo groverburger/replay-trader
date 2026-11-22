@@ -11,5 +11,8 @@ void chart_load_font();
 BKNode* chart_new();
 // Recomputes indicators and axis ranges for the current replay state; call before the chart is rendered.
 void chart_prepare();
+// Advances the zoom and axis easing by dt seconds (before chart_prepare); true while still animating.
+bool chart_animate(double dt);
+bool chart_animating();  // after chart_prepare: whether another frame is needed
 
 BKNode* equity_new();

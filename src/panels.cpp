@@ -218,7 +218,7 @@ void build_replay(BKNode* body) {
     });
     r = row(body);
     W.visible = number(r, "Bars in view", g.visible, 10, 20000, 1, 0, [](double v) {
-        g.visible = static_cast<int>(v);
+        g.visible = v;
         if (!g.follow) g.xmin = g.xmax - g.visible;
     });
     W.follow = toggle(r, "Follow (L)", g.follow, [](bool v) { g.follow = v; });
@@ -475,7 +475,7 @@ void panels_sync() {
     if (g.playing != W.play_icon) set_icon(W.play, (W.play_icon = g.playing) ? "PAUSE" : "PLAY");
     set_value(W.speed, g.speed_idx);
     set_value(W.tf, g.tf_idx);
-    set_value(W.visible, g.visible);
+    set_value(W.visible, std::round(g.visible));
     set_value(W.follow, g.follow);
     // ticket
     set_enabled(W.inst, g.broker.pos == 0);

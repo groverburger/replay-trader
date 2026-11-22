@@ -151,7 +151,7 @@ void refresh_series() {
         if (d.on) warm = std::max(warm, d.warmup());
     const Agg& a = g.agg();
     int64_t cur_bucket = static_cast<int64_t>(a.bucket_of(g.cursor));
-    int64_t view_lo = g.follow ? cur_bucket - g.visible : static_cast<int64_t>(std::floor(g.xmin));
+    int64_t view_lo = g.follow ? cur_bucket - static_cast<int64_t>(std::ceil(g.visible)) : static_cast<int64_t>(std::floor(g.xmin));
     int64_t lo = std::max<int64_t>(0, std::min(view_lo, cur_bucket) - warm);
     lo = std::max(lo, cur_bucket - 60000);  // bound the work when zoomed far out
     lo -= lo % 64;                          // fewer rebuilds while panning

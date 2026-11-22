@@ -21,8 +21,8 @@ draws on the CPU and only redraws what changed, so an idle window uses no CPU.
 ## Data
 
 Bars come from the karaiq Futures Data API (`https://api.karaiq.com/data/NQ?bar=1min&security_type=future`, with
-an `X-API-Key` header). The cache is a per-user folder: `~/Library/Application Support/NQ Replay Trader/` on
-macOS, `%APPDATA%\NQ Replay Trader\` on Windows, `~/.local/share/nq-replay-trader/` on Linux.
+an `X-API-Key` header). The cache is a per-user folder: `~/Library/Application Support/Replay Trader/` on
+macOS, `%APPDATA%\Replay Trader\` on Windows, `~/.local/share/replay-trader/` on Linux.
 `NQRT_DATA_DIR` overrides it.
 
 - The API serves the continuous front month, newest first, with US Central bar-start times. It returns at most

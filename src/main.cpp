@@ -1,4 +1,4 @@
-// NQ replay trader: reveal 1-minute bars one at a time, chart them on any timeframe, add indicators, and paper
+// Replay Trader: reveal 1-minute bars one at a time, chart them on any timeframe, add indicators, and paper
 // trade against the replay. Nothing after the replay cursor is ever shown or used. UI: BUI (Blender's interface
 // as a C library): a widget tree for the panels and a custom-drawn node for the chart.
 //
@@ -76,14 +76,17 @@ void on_frame(void*, BKWindow* win) {
     auto now = std::chrono::steady_clock::now();
     double dt = std::min(0.1, std::chrono::duration<double>(now - g_last_frame).count());
     g_last_frame = now;
-    if (g_trading) tick(dt);
+    if (g_trading) {
+        tick(dt);
+        chart_animate(dt);
+    }
     // a download that finished cleanly goes straight on to the trader
     else if (g_dl.finished() && g_dl.runs != g_handled_run) {
         g_handled_run = g_dl.runs;
         if (g_dl.error().empty()) enter_trader();
     }
     sync();
-    if (g_trading && g.playing) BK_window_request_frame(win, 1);
+    if (g_trading && (g.playing || chart_animating())) BK_window_request_frame(win, 1);
 }
 
 void on_wake() { poke(); }
@@ -296,7 +299,7 @@ int main(int argc, char** argv) {
     } else {
         BK_window_wake_init(on_wake);
         g_dl.on_progress = [] { BK_window_wake(); };
-        g_win = BK_window_new(ctx, "NQ replay trader", W, H);
+        g_win = BK_window_new(ctx, "Replay Trader", W, H);
         BKWindowCallbacks cb{};
         cb.on_frame = on_frame;
         cb.on_close = on_close;

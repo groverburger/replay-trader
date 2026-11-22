@@ -21,23 +21,23 @@ jobs:
       - name: Smoke test
         run: |
           python3 tools/make_test_data.py test.bin
-          APP="build/NQ Replay Trader.app"
-          "$APP/Contents/MacOS/NQ Replay Trader" --data test.bin --demo --screenshot smoke-macos.bmp
-          lipo -info "$APP/Contents/MacOS/NQ Replay Trader"
+          APP="build/Replay Trader.app"
+          "$APP/Contents/MacOS/Replay Trader" --data test.bin --demo --screenshot smoke-macos.bmp
+          lipo -info "$APP/Contents/MacOS/Replay Trader"
       - name: Package
         run: |
-          APP="build/NQ Replay Trader.app"
+          APP="build/Replay Trader.app"
           codesign --force --deep -s - "$APP"
           mkdir -p stage
-          ditto "$APP" "stage/NQ Replay Trader.app"
+          ditto "$APP" "stage/Replay Trader.app"
           cp packaging/READ-ME-FIRST.txt stage/
           git archive --format=zip --prefix=replay-trader-source/ -o stage/replay-trader-source.zip HEAD
-          (cd stage && zip -qry ../NQ-Replay-Trader-macOS.zip .)
+          (cd stage && zip -qry ../Replay-Trader-macOS.zip .)
       - uses: actions/upload-artifact@v4
         with:
           name: macos
           path: |
-            NQ-Replay-Trader-macOS.zip
+            Replay-Trader-macOS.zip
             smoke-macos.bmp
 
   windows:
@@ -63,26 +63,26 @@ jobs:
       - name: Smoke test
         run: |
           python tools/make_test_data.py test.bin
-          ./build/NQReplayTrader.exe --data test.bin --demo --screenshot smoke-windows.bmp
+          ./build/ReplayTrader.exe --data test.bin --demo --screenshot smoke-windows.bmp
           test -s smoke-windows.bmp
       - name: HTTPS check (a bad key must be rejected by the API)
         continue-on-error: true
         run: |
           set +e
-          NQRT_DATA_DIR="$PWD/tmpdata" ./build/NQReplayTrader.exe --api-key not-a-real-key --from 2025-03-03 --screenshot x.bmp > http.log 2>&1
+          NQRT_DATA_DIR="$PWD/tmpdata" ./build/ReplayTrader.exe --api-key not-a-real-key --from 2025-03-03 --screenshot x.bmp > http.log 2>&1
           cat http.log
           grep -q "rejected the key" http.log
       - name: Package
         run: |
           mkdir -p stage
-          cp build/NQReplayTrader.exe packaging/READ-ME-FIRST.txt stage/
+          cp build/ReplayTrader.exe packaging/READ-ME-FIRST.txt stage/
           git archive --format=zip --prefix=replay-trader-source/ -o stage/replay-trader-source.zip HEAD
-          (cd stage && zip -qr ../NQ-Replay-Trader-Windows.zip .)
+          (cd stage && zip -qr ../Replay-Trader-Windows.zip .)
       - uses: actions/upload-artifact@v4
         with:
           name: windows
           path: |
-            NQ-Replay-Trader-Windows.zip
+            Replay-Trader-Windows.zip
             smoke-windows.bmp
 
   release:
@@ -94,8 +94,8 @@ jobs:
       - uses: softprops/action-gh-release@v2
         with:
           files: |
-            macos/NQ-Replay-Trader-macOS.zip
-            windows/NQ-Replay-Trader-Windows.zip
+            macos/Replay-Trader-macOS.zip
+            windows/Replay-Trader-Windows.zip
           generate_release_notes: true
           body: |
             Download the zip for your system. First launch: see "Download" in the README (macOS: System Settings >

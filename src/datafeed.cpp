@@ -285,22 +285,32 @@ void apply_rolls(Market& m, std::vector<std::string>* notes) {
 
 // ---------------------------------------------------------------- files and keys
 fs::path data_dir() {
-    fs::path p;
+    // The app was called "NQ Replay Trader" until 1.1: an existing folder under the old name is moved, so the
+    // downloaded history and saved key carry over.
+    fs::path p, old;
 #ifdef _WIN32
     if (const wchar_t* d = _wgetenv(L"NQRT_DATA_DIR")) p = d;
-    else if (const wchar_t* a = _wgetenv(L"APPDATA")) p = fs::path(a) / "NQ Replay Trader";
-    else p = fs::current_path() / "NQ Replay Trader";
+    else {
+        const wchar_t* a = _wgetenv(L"APPDATA");
+        fs::path base = a ? fs::path(a) : fs::current_path();
+        p = base / "Replay Trader", old = base / "NQ Replay Trader";
+    }
 #else
     const char* home = std::getenv("HOME");
+    fs::path h = home ? home : ".";
     if (const char* d = std::getenv("NQRT_DATA_DIR")) p = d;
 #ifdef __APPLE__
-    else p = fs::path(home ? home : ".") / "Library" / "Application Support" / "NQ Replay Trader";
+    else p = h / "Library" / "Application Support" / "Replay Trader", old = p.parent_path() / "NQ Replay Trader";
 #else
-    else if (const char* x = std::getenv("XDG_DATA_HOME")) p = fs::path(x) / "nq-replay-trader";
-    else p = fs::path(home ? home : ".") / ".local" / "share" / "nq-replay-trader";
+    else {
+        const char* x = std::getenv("XDG_DATA_HOME");
+        fs::path base = x ? fs::path(x) : h / ".local" / "share";
+        p = base / "replay-trader", old = base / "nq-replay-trader";
+    }
 #endif
 #endif
     std::error_code ec;
+    if (!old.empty() && !fs::exists(p, ec) && fs::is_directory(old, ec)) fs::rename(old, p, ec);
     fs::create_directories(p, ec);
     return p;
 }

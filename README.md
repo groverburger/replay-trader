@@ -1,4 +1,4 @@
-# NQ Replay Trader
+# Replay Trader
 
 Practise trading Nasdaq-100 futures (NQ) on real history, one minute at a time. Pick a day, or let the app pick
 a random one, then step or play the market forward and trade it with a paper broker. You never see what happens
@@ -22,15 +22,15 @@ Get the latest build from the [Releases](../../releases) page:
 
 | | |
 |---|---|
-| **macOS** 11 or later (Apple Silicon and Intel) | `NQ-Replay-Trader-macOS.zip` |
-| **Windows** 10 or later (64-bit) | `NQ-Replay-Trader-Windows.zip` |
+| **macOS** 11 or later (Apple Silicon and Intel) | `Replay-Trader-macOS.zip` |
+| **Windows** 10 or later (64-bit) | `Replay-Trader-Windows.zip` |
 
 The apps aren't signed with a paid Apple or Microsoft certificate, so the first launch needs one extra step:
 
 - **macOS:** unzip, move the app to Applications and open it. When macOS refuses, go to
   **System Settings > Privacy & Security** and click **Open Anyway**. (On macOS 14 and earlier, right-click the
   app and choose **Open**.)
-- **Windows:** unzip and run `NQReplayTrader.exe`. If SmartScreen says "Windows protected your PC", click
+- **Windows:** unzip and run `ReplayTrader.exe`. If SmartScreen says "Windows protected your PC", click
   **More info > Run anyway**.
 
 ## Getting started
@@ -46,7 +46,7 @@ You need an API key for the [karaiq Futures Data API](https://api.karaiq.com), w
 3. After that, each start only fetches the new days, which takes a few seconds.
 
 The data (about 150 MB), your saved key and exported trades are stored in
-`~/Library/Application Support/NQ Replay Trader/` on macOS, or `%APPDATA%\NQ Replay Trader\` on Windows.
+`~/Library/Application Support/Replay Trader/` on macOS, or `%APPDATA%\Replay Trader\` on Windows.
 Delete that folder to remove everything.
 
 ## How to use it

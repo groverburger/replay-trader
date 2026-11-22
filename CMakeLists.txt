@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-# RT_DIST=ON: the shareable build. macOS: "NQ Replay Trader.app", universal (arm64 + x86_64), no paths from this
+# RT_DIST=ON: the shareable build. macOS: "Replay Trader.app", universal (arm64 + x86_64), no paths from this
 # machine baked in. Windows: one static .exe with no console window. See README "Sharing".
 option(RT_DIST "Build the shareable app (bundle / static exe, no local font)" OFF)
 if(RT_DIST AND APPLE AND NOT CMAKE_OSX_ARCHITECTURES)
@@ -10,7 +10,7 @@ if(APPLE AND NOT CMAKE_OSX_DEPLOYMENT_TARGET)
   set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "" FORCE)
 endif()
 
-project(replay_trader VERSION 1.0 LANGUAGES CXX C)
+project(replay_trader VERSION 1.1 LANGUAGES CXX C)
 
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
@@ -47,15 +47,15 @@ set(RT_SOURCES
 if(RT_DIST AND APPLE)
   add_executable(replay_trader MACOSX_BUNDLE ${RT_SOURCES})
   set_target_properties(replay_trader PROPERTIES
-    OUTPUT_NAME "NQ Replay Trader"
+    OUTPUT_NAME "Replay Trader"
     MACOSX_BUNDLE_INFO_PLIST ${CMAKE_CURRENT_SOURCE_DIR}/packaging/Info.plist.in
-    MACOSX_BUNDLE_BUNDLE_NAME "NQ Replay Trader"
+    MACOSX_BUNDLE_BUNDLE_NAME "Replay Trader"
     MACOSX_BUNDLE_GUI_IDENTIFIER "local.teamsafi.replay-trader"
     MACOSX_BUNDLE_SHORT_VERSION_STRING ${PROJECT_VERSION}
     MACOSX_BUNDLE_BUNDLE_VERSION ${PROJECT_VERSION})
 elseif(RT_DIST AND WIN32)
   add_executable(replay_trader WIN32 ${RT_SOURCES})  # GUI subsystem: no console window
-  set_target_properties(replay_trader PROPERTIES OUTPUT_NAME "NQReplayTrader")
+  set_target_properties(replay_trader PROPERTIES OUTPUT_NAME "ReplayTrader")
   if(MSVC)
     target_link_options(replay_trader PRIVATE /ENTRY:mainCRTStartup)
   endif()

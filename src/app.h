@@ -50,7 +50,7 @@ struct App {
     bool playing = false, rth_only = false, hide_dates = false, follow = true, sessions = true;
     int speed_idx = 3;
     double accum = 0;
-    int visible = 120;          // chart bars in view when following
+    double visible = 120;       // chart bars in view when following (fractional while a zoom animates)
     double xmin = 0, xmax = 100;
     Broker broker;
     int qty = 1, instrument = 0;  // 0 NQ, 1 MNQ

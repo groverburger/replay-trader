@@ -21,8 +21,8 @@
 
 namespace fs = std::filesystem;
 
-// Per-user folder: macOS ~/Library/Application Support/NQ Replay Trader, Windows %APPDATA%\NQ Replay Trader,
-// Linux ~/.local/share/nq-replay-trader. NQRT_DATA_DIR overrides it. Created on first use.
+// Per-user folder: macOS ~/Library/Application Support/Replay Trader, Windows %APPDATA%\Replay Trader,
+// Linux ~/.local/share/replay-trader. NQRT_DATA_DIR overrides it. Created on first use.
 fs::path data_dir();
 std::FILE* open_file(const fs::path& p, const char* mode);  // UTF-8-safe on Windows
 

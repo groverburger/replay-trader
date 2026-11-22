@@ -1,7 +1,7 @@
 #!/bin/sh
 # Builds the shareable apps into dist/:
-#   dist/NQ-Replay-Trader-macOS.zip    universal .app (Apple Silicon + Intel), ad-hoc signed
-#   dist/NQ-Replay-Trader-Windows.zip  NQReplayTrader.exe (x64, static), cross-compiled with mingw-w64
+#   dist/Replay-Trader-macOS.zip    universal .app (Apple Silicon + Intel), ad-hoc signed
+#   dist/Replay-Trader-Windows.zip  ReplayTrader.exe (x64, static), cross-compiled with mingw-w64
 # Each zip also holds READ-ME-FIRST.txt and the source (BUI is GPL-3.0, so the app is too and ships with source).
 # Needs: cmake, Xcode command line tools, and for Windows `brew install mingw-w64`.
 set -eu
@@ -19,13 +19,13 @@ cp -R CMakeLists.txt README.md LICENSE src packaging tools docs "$SRC/"
 # macOS
 cmake -S . -B build-mac -DRT_DIST=ON >/dev/null
 cmake --build build-mac -j >/dev/null
-APP="build-mac/NQ Replay Trader.app"
+APP="build-mac/Replay Trader.app"
 codesign --force --deep -s - "$APP"
 M="$DIST/stage/mac"
 mkdir -p "$M"
-ditto "$APP" "$M/NQ Replay Trader.app"
+ditto "$APP" "$M/Replay Trader.app"
 cp packaging/READ-ME-FIRST.txt "$DIST/stage/replay_trader-source.zip" "$M/"
-(cd "$M" && zip -qry "$DIST/NQ-Replay-Trader-macOS.zip" .)  # -y keeps the bundle's symlinks
+(cd "$M" && zip -qry "$DIST/Replay-Trader-macOS.zip" .)  # -y keeps the bundle's symlinks
 
 # Windows
 if command -v x86_64-w64-mingw32-g++ >/dev/null; then
@@ -33,8 +33,8 @@ if command -v x86_64-w64-mingw32-g++ >/dev/null; then
   cmake --build build-win -j >/dev/null
   W="$DIST/stage/win"
   mkdir -p "$W"
-  cp build-win/NQReplayTrader.exe packaging/READ-ME-FIRST.txt "$DIST/stage/replay_trader-source.zip" "$W/"
-  (cd "$W" && zip -qr "$DIST/NQ-Replay-Trader-Windows.zip" .)
+  cp build-win/ReplayTrader.exe packaging/READ-ME-FIRST.txt "$DIST/stage/replay_trader-source.zip" "$W/"
+  (cd "$W" && zip -qr "$DIST/Replay-Trader-Windows.zip" .)
 else
   echo "mingw-w64 not found: skipped the Windows build (brew install mingw-w64)"
 fi

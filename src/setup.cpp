@@ -74,7 +74,7 @@ BKNode* setup_new(const std::string& key, const std::string& source) {
     BK_set_num(S.root, "padding", 14);
     BK_set_num(S.root, "spacing", 6);
 
-    BKNode* title = label(S.root, "NQ replay trader");
+    BKNode* title = label(S.root, "Replay Trader");
     BK_set_num(title, "bold", 1);
     label(S.root, "NQ futures 1-minute bars (Dec 2009 to today) download from the karaiq", true);
     label(S.root, "Futures Data API (api.karaiq.com) with your API key. The full history is", true);
