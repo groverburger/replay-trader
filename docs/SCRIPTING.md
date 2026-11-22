@@ -156,6 +156,9 @@ return strategy {
 - `ctx:market_open_next()` is false when trading stops right after that bar: the daily break, weekends,
   holidays and early closes.
 - `ctx:trading()` is false during `warmup_days`.
+- `ctx:adj()` (and `bar.adj`) is the contract-roll adjustment at the minute that just closed. Prices jump at
+  each roll; `price - ctx:adj()` is continuous. Use it for anything that compares prices across days, such as
+  multi-day returns, RSI or volatility.
 
 **Account.**
 

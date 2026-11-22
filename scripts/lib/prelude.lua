@@ -233,6 +233,9 @@ function __make_ctx(core)
   function ctx:bar_end() return core.bar_end() end                -- end of the bar that just closed
   function ctx:market_open_next() return core.open_next() end     -- trading continues right after it
   function ctx:trading() return core.trading() end                -- false during warmup_days
+  -- roll adjustment at the minute that just closed: (price - ctx:adj()) is continuous across contract rolls
+  -- (back-adjusted to the current contract); use it for anything spanning days. bar.adj is the same value.
+  function ctx:adj() return core.adj() end
 
   -- account
   function ctx:position() return (core.position()) end             -- signed contracts

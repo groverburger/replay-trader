@@ -53,7 +53,7 @@ bool StrategyRun::start(lua_State* L, const ScriptDef& def, const Params& p, Bro
         {"modify", bound<&StrategyRun::modify>},        {"orders", bound<&StrategyRun::orders>},
         {"log", bound<&StrategyRun::log>},              {"point_value", bound<&StrategyRun::point_value>},
         {"trading", bound<&StrategyRun::is_trading>},   {"open_next", bound<&StrategyRun::open_next>},
-        {"bar_end", bound<&StrategyRun::bar_end>}};
+        {"bar_end", bound<&StrategyRun::bar_end>},      {"adj", bound<&StrategyRun::roll_adj>}};
     for (auto& [name, fn] : fns) {
         lua_pushlightuserdata(L, this);
         lua_pushcclosure(L, fn, 1);
@@ -158,6 +158,7 @@ void StrategyRun::after_minute(size_t i) {
         static const char* names[] = {"", "open", "high", "low", "close", "volume", "time"};
         lua_setfield(L_, -2, names[f]);
     }
+    lua_pushnumber(L_, m_->adj[i]), lua_setfield(L_, -2, "adj");  // roll adjustment: price - adj is continuous
     call("on_bar", 1);
 }
 
@@ -188,6 +189,7 @@ int StrategyRun::last(lua_State* L) { return lua_pushnumber(L, m_->c[i_]), 1; }
 int StrategyRun::point_value(lua_State* L) { return lua_pushnumber(L, b_->mult), 1; }
 
 int StrategyRun::is_trading(lua_State* L) { return lua_pushboolean(L, trading()), 1; }
+int StrategyRun::roll_adj(lua_State* L) { return lua_pushnumber(L, m_->adj[i_]), 1; }
 
 // End of the last closed strategy bar (New York minutes).
 int StrategyRun::bar_end(lua_State* L) {

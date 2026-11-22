@@ -45,6 +45,7 @@ public:
     int is_trading(lua_State* L);
     int open_next(lua_State* L);
     int bar_end(lua_State* L);
+    int roll_adj(lua_State* L);
 
 private:
     bool call(const char* fn, int nargs);  // def[fn](ctx, p, ...) with nargs extra values on the stack
