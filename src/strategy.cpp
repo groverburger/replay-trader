@@ -27,6 +27,8 @@ std::string clock(int64_t t) {
     return b;
 }
 
+const char* const kBarKeys[7] = {"open", "high", "low", "close", "volume", "time", "adj"};
+
 const char* type_name(OrderType t) { return t == OrderType::Market ? "market" : t == OrderType::Limit ? "limit" : "stop"; }
 
 }  // namespace
@@ -64,6 +66,13 @@ bool StrategyRun::start(lua_State* L, const ScriptDef& def, const Params& p, Bro
     std::string err;
     if (!call_script(L, 1, 1, err)) return fail(err), false;
     ctx_ref_ = luaL_ref(L, LUA_REGISTRYINDEX);
+    lua_rawgeti(L, LUA_REGISTRYINDEX, ref_);
+    lua_getfield(L, -1, "on_bar");
+    on_bar_ref_ = lua_isfunction(L, -1) ? luaL_ref(L, LUA_REGISTRYINDEX) : (lua_pop(L, 1), -1);
+    lua_pop(L, 1);
+    lua_createtable(L, 7, 0);
+    for (int k = 0; k < 7; ++k) lua_pushstring(L, kBarKeys[k]), lua_rawseti(L, -2, k + 1);
+    keys_ref_ = luaL_ref(L, LUA_REGISTRYINDEX);
 
     if (agg_) {  // the last strategy bar that has fully closed at minute `at`
         long b = static_cast<long>(agg_->bucket_of(at));
@@ -80,12 +89,12 @@ bool StrategyRun::start(lua_State* L, const ScriptDef& def, const Params& p, Bro
 
 void StrategyRun::stop() {
     if (L_) {
-        for (int* r : {&ref_, &ctx_ref_, &p_ref_}) {
+        for (int* r : {&ref_, &ctx_ref_, &p_ref_, &on_bar_ref_, &keys_ref_}) {
             if (*r >= 0) luaL_unref(L_, LUA_REGISTRYINDEX, *r);
             *r = -2;
         }
     }
-    ref_ = ctx_ref_ = p_ref_ = -2;
+    ref_ = ctx_ref_ = p_ref_ = on_bar_ref_ = keys_ref_ = -2;
 }
 
 void StrategyRun::fail(const std::string& e) {
@@ -149,17 +158,38 @@ void StrategyRun::after_minute(size_t i) {
     }
     if (!closed || b <= done_) return;
     done_ = b;
-    lua_createtable(L_, 0, 6);
-    for (int f = 1; f <= 6; ++f) {
-        lua_pushinteger(L_, 0);  // get_bar(0, f) pushes the value
-        lua_pushinteger(L_, f);
-        get_bar(L_);
-        lua_remove(L_, -2), lua_remove(L_, -2);
-        static const char* names[] = {"", "open", "high", "low", "close", "volume", "time"};
-        lua_setfield(L_, -2, names[f]);
+    if (on_bar_ref_ < 0 || !running()) return;
+    // on_bar(ctx, p, bar), pushed in call order; this runs once per bar, so field names come from keys_ref_
+    // (no C-string lookups) and the function was looked up at start.
+    int base = lua_gettop(L_);
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, on_bar_ref_);
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, ctx_ref_);
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, p_ref_);
+    lua_rawgeti(L_, LUA_REGISTRYINDEX, keys_ref_);
+    int keys = lua_gettop(L_);
+    lua_createtable(L_, 0, 7);
+    double v[5];
+    int64_t t;
+    if (agg_) {
+        const Agg& a = *agg_;
+        v[0] = a.o[b], v[1] = a.h[b], v[2] = a.l[b], v[3] = a.c[b], v[4] = a.v[b], t = a.t[b];
+    } else {
+        const Market& m = *m_;
+        v[0] = m.o[b], v[1] = m.h[b], v[2] = m.l[b], v[3] = m.c[b], v[4] = m.v[b], t = m.t[b];
     }
-    lua_pushnumber(L_, m_->adj[i]), lua_setfield(L_, -2, "adj");  // roll adjustment: price - adj is continuous
-    call("on_bar", 1);
+    for (int k = 0; k < 7; ++k) {
+        lua_rawgeti(L_, keys, k + 1);
+        if (k < 5) lua_pushnumber(L_, v[k]);
+        else if (k == 5) lua_pushinteger(L_, t);
+        else lua_pushnumber(L_, m_->adj[i]);  // roll adjustment: price - adj is continuous
+        lua_rawset(L_, -3);
+    }
+    lua_remove(L_, keys);
+    std::string err;
+    set_script_deadline(L_, 1.0);
+    bool ok = call_script(L_, 3, 0, err);
+    lua_settop(L_, base);
+    if (!ok) fail(err);
 }
 
 // ---------------------------------------------------------------- bindings

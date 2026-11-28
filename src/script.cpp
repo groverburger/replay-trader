@@ -1,15 +1,28 @@
 #include "script.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <map>
+#include <mutex>
+#include <set>
+#include <thread>
 
 #include "datafeed.h"
 #include "embedded_files.h"
 #include "lua.hpp"
+
+#ifdef _WIN32
+#define WIN32_LEAN_AND_MEAN
+#define NOMINMAX
+#include <windows.h>
+#else
+#include <pthread.h>
+#include <csignal>
+#endif
 
 ScriptHost g_scripts;
 
@@ -20,17 +33,98 @@ const double kNaN = std::nan("");
 // Per-state data, kept in the state's extra space.
 struct StateInfo {
     std::vector<std::string>* sink = nullptr;  // print() and errors
-    std::chrono::steady_clock::time_point deadline{};
-    bool timed = false;
+    // The current call's time limit: steady_clock ticks, or 0 for none. Atomic: the watchdog thread reads it.
+    std::atomic<int64_t> deadline{0};
+    bool watched = false;                      // registered with the watchdog
+#ifdef _WIN32
+    std::atomic<DWORD> thread{0};              // the thread making the timed call
+#else
+    std::atomic<pthread_t> thread{};
+#endif
+    long bars_key = -1;                        // run_indicator's cached bars table
+    int bars_ref = LUA_NOREF, bars_gen = -1;
 };
 
 StateInfo*& info(lua_State* L) { return *static_cast<StateInfo**>(lua_getextraspace(L)); }
 
+// Time limits. A permanent count hook would make Lua 5.4 run every instruction through its hook dispatch (about
+// half the speed), so no hook is installed while scripts run normally: a watchdog thread installs one only on a
+// state whose call has passed its deadline, and the hook raises the error in that state's own thread.
+// lua_sethook walks the state's call frames, so it must not run alongside that thread: it is called with the
+// thread interrupted, from a signal handler (as lua.c does for Ctrl+C) or, on Windows, with the thread suspended.
+// The watchdog's mutex keeps the state (and so its thread) alive meanwhile.
+struct Watchdog {
+    std::mutex mu;
+    std::set<lua_State*> states;  // states with a deadline armed
+    bool started = false;
+};
+Watchdog& watchdog() {
+    static Watchdog* w = new Watchdog;  // never destroyed: its detached thread may outlive static destructors
+    return *w;
+}
+
+int64_t ticks() { return std::chrono::steady_clock::now().time_since_epoch().count(); }
+
+bool expired(StateInfo* s, int64_t now) {
+    int64_t d = s ? s->deadline.load() : 0;
+    return d != 0 && now > d;
+}
+
+// Runs in the script's own thread. It may come late, after the call it was meant for has returned (the watchdog
+// saw the old deadline): then the current call's deadline decides, and an unexpired one just removes the hook.
 void hook(lua_State* L, lua_Debug*) {
-    StateInfo* s = info(L);
-    if (s && s->timed && std::chrono::steady_clock::now() > s->deadline) {
-        s->timed = false;
-        luaL_error(L, "script ran too long (endless loop?)");
+    bool over;
+    {
+        std::lock_guard<std::mutex> l(watchdog().mu);
+        StateInfo* s = info(L);
+        over = expired(s, ticks());
+        if (over) s->deadline = 0;
+        lua_sethook(L, nullptr, 0, 0);
+    }
+    if (over) luaL_error(L, "script ran too long (endless loop?)");
+}
+
+#ifndef _WIN32
+constexpr int kInterruptSignal = SIGUSR2;
+std::atomic<lua_State*> g_interrupt{nullptr};  // the state the signal is for; cleared by the handler when done
+
+void on_interrupt(int) {
+    if (lua_State* L = g_interrupt.load()) {
+        lua_sethook(L, hook, LUA_MASKCOUNT, 1);  // the next instruction runs the hook
+        g_interrupt.store(nullptr);
+    }
+}
+#endif
+
+// Installs the hook in L, with the thread running it stopped (with w.mu held).
+void interrupt(lua_State* L, StateInfo* s) {
+#ifdef _WIN32
+    HANDLE h = OpenThread(THREAD_SUSPEND_RESUME | THREAD_GET_CONTEXT, FALSE, s->thread.load());
+    if (!h) return;
+    if (SuspendThread(h) != static_cast<DWORD>(-1)) {
+        CONTEXT c{};
+        c.ContextFlags = CONTEXT_CONTROL;
+        GetThreadContext(h, &c);  // waits until the suspension has taken effect
+        lua_sethook(L, hook, LUA_MASKCOUNT, 1);
+        ResumeThread(h);
+    }
+    CloseHandle(h);
+#else
+    g_interrupt.store(L);
+    if (pthread_kill(s->thread.load(), kInterruptSignal) != 0) return g_interrupt.store(nullptr);
+    for (int k = 0; k < 200 && g_interrupt.load(); ++k) std::this_thread::sleep_for(std::chrono::microseconds(500));
+    g_interrupt.store(nullptr);  // not handled within 100 ms: the next round tries again
+#endif
+}
+
+void watchdog_loop() {
+    Watchdog& w = watchdog();
+    for (;;) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(25));
+        std::lock_guard<std::mutex> l(w.mu);
+        int64_t now = ticks();
+        for (lua_State* L : w.states)
+            if (StateInfo* s = info(L); expired(s, now) && !lua_gethook(L)) interrupt(L, s);
     }
 }
 
@@ -206,7 +300,6 @@ lua_State* new_script_state(std::string& err) {
     }
     lua_pushcfunction(L, l_print);
     lua_setglobal(L, "print");
-    lua_sethook(L, hook, LUA_MASKCOUNT, 100000);
     const EmbeddedFile* pre = embedded("lib/prelude.lua");
     if (!pre || luaL_loadbufferx(L, pre->data, pre->size, "@prelude.lua", "t") != LUA_OK || !call_script(L, 0, 0, err)) {
         if (pre && err.empty()) err = lua_tostring(L, -1);
@@ -216,6 +309,10 @@ lua_State* new_script_state(std::string& err) {
 }
 
 void close_script_state(lua_State* L) {
+    {
+        std::lock_guard<std::mutex> l(watchdog().mu);
+        watchdog().states.erase(L);
+    }
     delete info(L);
     info(L) = nullptr;
     lua_close(L);
@@ -225,8 +322,30 @@ void set_script_sink(lua_State* L, std::vector<std::string>* sink) { info(L)->si
 
 void set_script_deadline(lua_State* L, double seconds) {
     StateInfo* s = info(L);
-    s->timed = seconds > 0;
-    s->deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(static_cast<long>(seconds * 1000));
+    if (!s->watched) {  // the first deadline on this state: register it (the only locking on the hot path)
+        Watchdog& w = watchdog();
+        std::lock_guard<std::mutex> l(w.mu);
+        w.states.insert(L);
+        s->watched = true;
+        if (!w.started) {
+#ifndef _WIN32
+            struct sigaction sa {};
+            sa.sa_handler = on_interrupt;
+            sa.sa_flags = SA_RESTART;
+            sigemptyset(&sa.sa_mask);
+            sigaction(kInterruptSignal, &sa, nullptr);
+#endif
+            w.started = true;
+            std::thread(watchdog_loop).detach();
+        }
+    }
+#ifdef _WIN32
+    s->thread.store(GetCurrentThreadId(), std::memory_order_relaxed);
+#else
+    s->thread.store(pthread_self(), std::memory_order_relaxed);
+#endif
+    auto span = std::chrono::duration_cast<std::chrono::steady_clock::duration>(std::chrono::duration<double>(seconds));
+    s->deadline.store(seconds > 0 ? ticks() + span.count() : 0);  // after thread: the watchdog reads both
 }
 
 bool call_script(lua_State* L, int nargs, int nresults, std::string& err) {
@@ -234,6 +353,11 @@ bool call_script(lua_State* L, int nargs, int nresults, std::string& err) {
     lua_pushcfunction(L, traceback);
     lua_insert(L, base);
     int rc = lua_pcall(L, nargs, nresults, base);
+    if (StateInfo* s = info(L)) s->deadline.store(0);  // a deadline covers one call
+    if (lua_gethook(L)) {  // the watchdog fired as the call ended
+        std::lock_guard<std::mutex> l(watchdog().mu);
+        lua_sethook(L, nullptr, 0, 0);
+    }
     lua_remove(L, base);
     if (rc != LUA_OK) {
         err = lua_tostring(L, -1) ? lua_tostring(L, -1) : "error";
@@ -380,14 +504,20 @@ int script_warmup(lua_State* L, const ScriptDef& d, const Params& p) {
 
 // ---------------------------------------------------------------- indicators
 bool run_indicator(const ScriptDef& d, const Params& p, const Series& s, int tf, long series_key, IndOutput& out) {
-    lua_State* L = g_scripts.L;
-    static long bars_key = -1;
-    static int bars_ref = LUA_NOREF, bars_gen = -1;
+    return run_indicator_in(g_scripts.L, g_scripts.generation(), d, p, s, tf, series_key, out);
+}
+
+bool run_indicator_in(lua_State* L, int gen, const ScriptDef& d, const Params& p, const Series& s, int tf,
+                      long series_key, IndOutput& out) {
     out = {};
+    out.x0 = s.x0, out.n = static_cast<long>(s.n());
     out.plots.assign(d.plots.size(), std::vector<double>(s.n(), kNaN));
     if (d.ref < 0 || !L) return out.error = d.error, false;
+    StateInfo* si = info(L);
+    long& bars_key = si->bars_key;
+    int &bars_ref = si->bars_ref, &bars_gen = si->bars_gen;
     int top = lua_gettop(L);
-    if (series_key != bars_key || bars_gen != g_scripts.generation() || bars_ref == LUA_NOREF) {
+    if (series_key != bars_key || bars_gen != gen || bars_ref == LUA_NOREF) {
         luaL_unref(L, LUA_REGISTRYINDEX, bars_ref);
         int n = static_cast<int>(s.n());
         lua_createtable(L, 0, 10);
@@ -406,7 +536,7 @@ bool run_indicator(const ScriptDef& d, const Params& p, const Series& s, int tf,
         lua_pushboolean(L, s.last_partial), lua_setfield(L, -2, "partial");
         lua_pushinteger(L, tf), lua_setfield(L, -2, "tf");
         bars_ref = luaL_ref(L, LUA_REGISTRYINDEX);
-        bars_key = series_key, bars_gen = g_scripts.generation();
+        bars_key = series_key, bars_gen = gen;
     }
     lua_rawgeti(L, LUA_REGISTRYINDEX, d.ref);
     int def = lua_gettop(L);
@@ -441,63 +571,84 @@ bool run_indicator(const ScriptDef& d, const Params& p, const Series& s, int tf,
             }
         lua_pop(L, 1);
     }
-    auto plot_index = [&](int idx) {
-        if (lua_type(L, idx) != LUA_TSTRING) return 0;
-        std::string nm = lua_tostring(L, idx);
-        for (size_t k = 0; k < d.plots.size(); ++k)
-            if (d.plots[k].name == nm) return static_cast<int>(k);
-        return 0;
+    // Shapes come as parallel arrays (see __new_output in the prelude): a count and one table per field.
+    auto count = [&](const char* name) {
+        lua_getfield(L, o, name);
+        lua_Integer k = lua_tointeger(L, -1);
+        lua_pop(L, 1);
+        return k;
     };
-    lua_getfield(L, o, "_markers");
-    for (lua_Integer k = 1; lua_rawgeti(L, -1, k) == LUA_TTABLE; ++k) {
-        for (int f = 1; f <= 4; ++f) lua_rawgeti(L, -f, f);
-        // stack: ..., entry, i, price, up, plot
-        long i = static_cast<long>(lua_tointeger(L, -4)) - 1;
-        if (i >= 0 && i < n) out.markers.push_back({i, lua_tonumber(L, -3), static_cast<bool>(lua_toboolean(L, -2)), plot_index(-1)});
-        lua_pop(L, 5);
+    int nplots = static_cast<int>(d.plots.size());
+    auto columns = [&](std::initializer_list<const char*> names) {  // pushes each field's table
+        for (const char* nm : names) lua_getfield(L, o, nm);
+        return static_cast<int>(names.size());
+    };
+    auto num = [&](int t, lua_Integer k, double def) {  // field table at stack index t, element k
+        lua_rawgeti(L, t, k);
+        int isnum = 0;
+        double v = lua_tonumberx(L, -1, &isnum);
+        lua_pop(L, 1);
+        return isnum ? v : def;
+    };
+    auto plot_of = [&](int t, lua_Integer k) {
+        int pk = static_cast<int>(num(t, k, 0));
+        return pk >= 0 && pk < nplots ? pk : 0;
+    };
+    if (lua_Integer cnt = count("_mn"); cnt > 0) {
+        int nc = columns({"_mi", "_mp", "_mu", "_mk"}), b = lua_gettop(L) - nc + 1;
+        out.markers.reserve(static_cast<size_t>(cnt));
+        for (lua_Integer k = 1; k <= cnt; ++k) {
+            long i = static_cast<long>(num(b, k, 0)) - 1;
+            lua_rawgeti(L, b + 2, k);
+            bool up = lua_toboolean(L, -1);
+            lua_pop(L, 1);
+            if (i >= 0 && i < n) out.markers.push_back({i, num(b + 1, k, 0), up, plot_of(b + 3, k)});
+        }
+        lua_pop(L, nc);
     }
-    lua_pop(L, 2);
-    lua_getfield(L, o, "_segments");
-    for (lua_Integer k = 1; lua_rawgeti(L, -1, k) == LUA_TTABLE; ++k) {
-        for (int f = 1; f <= 5; ++f) lua_rawgeti(L, -f, f);
-        // stack: ..., entry, i0, i1, price, plot, alpha
-        long i0 = static_cast<long>(lua_tointeger(L, -5)) - 1, i1 = static_cast<long>(lua_tointeger(L, -4)) - 1;
-        if (i0 >= 0 && i0 < n)
-            out.segments.push_back({i0, std::clamp(i1, i0, n - 1), lua_tonumber(L, -3), plot_index(-2),
-                                    static_cast<float>(lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0)});
-        lua_pop(L, 6);
+    if (lua_Integer cnt = count("_sn"); cnt > 0) {
+        int nc = columns({"_s0", "_s1", "_sp", "_sk", "_sa"}), b = lua_gettop(L) - nc + 1;
+        out.segments.reserve(static_cast<size_t>(cnt));
+        for (lua_Integer k = 1; k <= cnt; ++k) {
+            long i0 = static_cast<long>(num(b, k, 0)) - 1, i1 = static_cast<long>(num(b + 1, k, 0)) - 1;
+            if (i0 >= 0 && i0 < n)
+                out.segments.push_back({i0, std::clamp(i1, i0, n - 1), num(b + 2, k, 0), plot_of(b + 3, k),
+                                        static_cast<float>(num(b + 4, k, 1.0))});
+        }
+        lua_pop(L, nc);
     }
-    lua_pop(L, 2);
+    if (lua_Integer cnt = count("_bn"); cnt > 0) {
+        int nc = columns({"_bi", "_bk", "_ba", "_bc"}), b = lua_gettop(L) - nc + 1;
+        out.bars.reserve(static_cast<size_t>(cnt));
+        for (lua_Integer k = 1; k <= cnt; ++k) {
+            long i = static_cast<long>(num(b, k, 0)) - 1;
+            lua_rawgeti(L, b + 3, k);
+            bool candle = lua_toboolean(L, -1);
+            lua_pop(L, 1);
+            if (i >= 0 && i < n) out.bars.push_back({i, plot_of(b + 1, k), static_cast<float>(num(b + 2, k, 0.15)), candle});
+        }
+        lua_pop(L, nc);
+    }
     lua_getfield(L, o, "_orders");
     for (lua_Integer k = 1; lua_rawgeti(L, -1, k) == LUA_TTABLE; ++k) {
         IndOrder r;
-        auto num = [&](int f, double def) {
+        auto fld = [&](int f, double def) {
             lua_rawgeti(L, -1, f);
             double v = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : def;
             lua_pop(L, 1);
             return v;
         };
-        r.side = num(1, 1) < 0 ? -1 : 1;
+        r.side = fld(1, 1) < 0 ? -1 : 1;
         lua_rawgeti(L, -1, 2);
         std::string kind = lua_isstring(L, -1) ? lua_tostring(L, -1) : "stop";
         lua_pop(L, 1);
         r.kind = kind == "limit" ? OrderType::Limit : kind == "market" ? OrderType::Market : OrderType::Stop;
-        r.price = num(3, 0), r.stop = num(4, -1), r.target = num(5, -1), r.target2 = num(6, -1);
-        r.qty = static_cast<int>(num(7, 0));
+        r.price = fld(3, 0), r.stop = fld(4, -1), r.target = fld(5, -1), r.target2 = fld(6, -1);
+        r.qty = static_cast<int>(fld(7, 0));
         out.orders.push_back(r);
         lua_pop(L, 1);
     }
     lua_pop(L, 2);
-    lua_getfield(L, o, "_bars");
-    for (lua_Integer k = 1; lua_rawgeti(L, -1, k) == LUA_TTABLE; ++k) {
-        for (int f = 1; f <= 4; ++f) lua_rawgeti(L, -f, f);
-        // stack: ..., entry, i, plot, alpha, candle
-        long i = static_cast<long>(lua_tointeger(L, -4)) - 1;
-        if (i >= 0 && i < n)
-            out.bars.push_back({i, plot_index(-3), static_cast<float>(lua_isnumber(L, -2) ? lua_tonumber(L, -2) : 0.15),
-                                static_cast<bool>(lua_toboolean(L, -1))});
-        lua_pop(L, 5);
-    }
     lua_settop(L, top);
     return true;
 }

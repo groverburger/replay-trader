@@ -12,30 +12,39 @@ return indicator {
   label = function(p) return string.format("Pivots %d/%d", p.left, p.right) end,
   warmup = function(p) return p.left + p.right + 1 end,
   plots = { { "pivots", style = "markers" } },
+  -- One pass. Pivot i is confirmed at bar i + right; its level is tested from the bar after that. Unbroken
+  -- levels form a stack whose prices only get closer to the market towards the top (a new pivot high can't be
+  -- above an unbroken older one, or it would have broken it), so each bar pops the levels it breaks off the top.
   calc = function(bars, p, out)
-    local h, l, n = bars.high, bars.low, bars.n
-    for i = 1 + p.left, bars.last_complete - p.right do
-      local ph, pl = true, true
-      for j = i - p.left, i + p.right do
-        if j ~= i then
-          if (j < i and h[j] >= h[i]) or (j > i and h[j] > h[i]) then ph = false end
-          if (j < i and l[j] <= l[i]) or (j > i and l[j] < l[i]) then pl = false end
-          if not (ph or pl) then break end
-        end
+    local h, l, n, left, right = bars.high, bars.low, bars.n, p.left, p.right
+    local first, last = 1 + left, bars.last_complete - right
+    local levels = p.levels
+    local hs, hn, ls, ln = {}, 0, {}, 0   -- unbroken pivot highs / lows (bar indices), stack tops at hn / ln
+    for j = 1, n do
+      if levels then
+        local hj, lj = h[j], l[j]
+        while hn > 0 and h[hs[hn]] < hj do out:segment(hs[hn], j, h[hs[hn]], "pivots", 0.25); hn = hn - 1 end
+        while ln > 0 and l[ls[ln]] > lj do out:segment(ls[ln], j, l[ls[ln]], "pivots", 0.25); ln = ln - 1 end
       end
-      for _, high in ipairs({ true, false }) do
-        if (high and ph) or (not high and pl) then
-          local price = high and h[i] or l[i]
-          out:marker(i, price, high and "down" or "up", "pivots")
-          if p.levels then
-            local broken = nil
-            for j = i + p.right + 1, n do
-              if (high and h[j] > price) or (not high and l[j] < price) then broken = j; break end
-            end
-            out:segment(i, broken or n, price, "pivots", broken and 0.25 or 0.6)
-          end
+      local i = j - right
+      if i >= first and i <= last then
+        local hi, li = h[i], l[i]
+        local ph, pl = true, true
+        for k = i - left, i - 1 do if h[k] >= hi then ph = false; break end end
+        if ph then for k = i + 1, j do if h[k] > hi then ph = false; break end end end
+        for k = i - left, i - 1 do if l[k] <= li then pl = false; break end end
+        if pl then for k = i + 1, j do if l[k] < li then pl = false; break end end end
+        if ph then
+          out:marker(i, hi, "down", "pivots")
+          if levels then hn = hn + 1; hs[hn] = i end
+        end
+        if pl then
+          out:marker(i, li, "up", "pivots")
+          if levels then ln = ln + 1; ls[ln] = i end
         end
       end
     end
+    for k = 1, hn do out:segment(hs[k], n, h[hs[k]], "pivots", 0.6) end
+    for k = 1, ln do out:segment(ls[k], n, l[ls[k]], "pivots", 0.6) end
   end,
 }

@@ -82,6 +82,7 @@ add_custom_command(OUTPUT ${RT_EMBEDDED}
 set(RT_SOURCES
   ${RT_EMBEDDED}
   src/script.cpp
+  src/indworker.cpp
   src/strategy.cpp
   src/main.cpp
   src/softraster.cpp

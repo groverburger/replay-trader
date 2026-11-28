@@ -202,6 +202,50 @@ bool load_market() {
     return true;
 }
 
+// --bench-indicators: time every indicator (default params) on the chart's largest series (60000 bars) at a few
+// timeframes, ending at the last bar of the cached data. "build" includes making the Lua bars table; "calc" reuses it.
+int run_indicator_bench(const char* data_file) {
+    std::string err;
+    if (data_file ? !g.m.load(data_file, err) : !load_market()) return std::fprintf(stderr, "%s\n", err.c_str()), 1;
+    using clk = std::chrono::steady_clock;
+    long key = 1000000;
+    for (int tf : {1, 5, 15}) {
+        const Agg& a = g.agg_for(tf);
+        size_t cursor = g.m.size() - 1;
+        int64_t cur = tf == 1 ? static_cast<int64_t>(cursor) : static_cast<int64_t>(a.bucket_of(cursor));
+        Series s;
+        build_series(g.m, a, cursor, std::max<int64_t>(0, cur - 60000), s);
+        std::printf("tf %dm, %zu bars\n", tf, s.n());
+        for (const ScriptDef* d : g_scripts.list(false)) {
+            Params p = default_params(*d);
+            IndOutput out;
+            double best_build = 1e9, best_calc = 1e9;
+            for (int rep = 0; rep < 5; ++rep) {
+                auto t0 = clk::now();
+                run_indicator(*d, p, s, tf, ++key, out);
+                auto t1 = clk::now();
+                run_indicator(*d, p, s, tf, key, out);
+                auto t2 = clk::now();
+                best_build = std::min(best_build, std::chrono::duration<double, std::milli>(t1 - t0).count());
+                best_calc = std::min(best_calc, std::chrono::duration<double, std::milli>(t2 - t1).count());
+            }
+            // order-independent checksum of the output, to compare a rewritten script with the original
+            double sum = 0;
+            for (size_t k = 0; k < out.plots.size(); ++k)
+                for (size_t i = 0; i < out.plots[k].size(); ++i)
+                    if (std::isfinite(out.plots[k][i])) sum += out.plots[k][i] * static_cast<double>((i % 97) + k + 1);
+            for (const IndMarker& m : out.markers) sum += m.price * static_cast<double>(m.i % 89 + 1) + (m.up ? 7 : 3) + m.plot;
+            for (const IndSegment& g2 : out.segments)
+                sum += g2.price * static_cast<double>(g2.i0 % 83 + 1) + static_cast<double>(g2.i1 % 79) * g2.alpha + g2.plot;
+            for (const IndBarMark& b : out.bars) sum += static_cast<double>(b.i % 73) * b.alpha + b.plot + (b.candle ? 5 : 1);
+            std::printf("  %-18s build %7.2f ms  calc %7.2f ms  (%zu markers, %zu segments, sum %.15g)%s%s\n", d->id.c_str(),
+                        best_build, best_calc, out.markers.size(), out.segments.size(), sum, out.error.empty() ? "" : "  ERROR: ",
+                        out.error.substr(0, out.error.find('\n')).c_str());
+        }
+    }
+    return 0;
+}
+
 // --backtest: run a strategy over a date range and print the statistics (no window, no download).
 struct CostArgs {
     std::string mnq;              // --instrument nq|mnq ("" = NQ defaults)
@@ -617,8 +661,15 @@ struct Bench {
     void inject() {
         if (!on()) return;
         keep_animating();
+        if (frame == 0)  // RT_BENCH_ZOOM=20: start zoomed out that many times (lots of bars and indicator shapes)
+            if (const char* z = std::getenv("RT_BENCH_ZOOM")) chart_zoom_out(std::atof(z));
         if (frame < kWarm) return;
         int k = frame - kWarm;
+        if (mode == "play") {  // the replay advancing a minute every frame: indicators recompute each time
+            if (k % 120 == 0) std::fprintf(stderr, "bench play: %.0f bars visible, series %zu bars\n", g.xmax - g.xmin, g.s.n());
+            advance(1);
+            return;
+        }
         ImGuiIO& io = ImGui::GetIO();
         bool sidebar = mode == "scroll" || mode == "scrollwheel";
         io.AddMousePosEvent(sidebar ? 200 * g_ui_scale : io.DisplaySize.x * 0.6f, io.DisplaySize.y * 0.5f);
@@ -762,11 +813,13 @@ int run_window() {
 
     g_dl.on_progress = wake_from_worker;
     g.bt.on_progress = wake_from_worker;
+    chart_set_async(true);
     glfwShowWindow(g_win);
 
     const char* log_env = std::getenv("RT_FRAME_LOG");
     W.frame_log = log_env && *log_env && std::strcmp(log_env, "0");
     if (const char* b = std::getenv("RT_BENCH")) W.bench.mode = b;
+    if (const char* e = std::getenv("RT_IND_SYNC"); e && *e && std::strcmp(e, "0")) chart_set_async(false);
     double last_poll = glfwGetTime();
     W.t_prev = last_poll;
     g_loop_running = true;
@@ -824,6 +877,7 @@ int main(int argc, char** argv) {
     const char *bt_id = nullptr, *bt_from = nullptr, *bt_to = nullptr, *bt_csv = nullptr;
     std::vector<std::string> bt_sets;  // --set name=value (backtest params)
     CostArgs cost;
+    bool bench = false;
     for (int a = 1; a < argc; ++a) {
         if (!std::strcmp(argv[a], "--screenshot") && a + 1 < argc) shot = argv[++a];
         else if (!std::strcmp(argv[a], "--start") && a + 1 < argc) g_start = argv[++a];
@@ -856,6 +910,7 @@ int main(int argc, char** argv) {
             if (parse_minutes(argv[++a], m)) g_from_day = m / 1440;
         }
         else if (!std::strcmp(argv[a], "--demo")) g_demo = true;
+        else if (!std::strcmp(argv[a], "--bench-indicators")) bench = true;
         else if (!std::strcmp(argv[a], "--show-setup")) show_setup = true;  // screenshot the data screen
         else if (!std::strcmp(argv[a], "--show-strategy")) g_show_strategy = true;  // screenshot the Strategy panel
         else if (!std::strcmp(argv[a], "--help") || !std::strcmp(argv[a], "-h")) {
@@ -879,6 +934,7 @@ int main(int argc, char** argv) {
     bool headless = shot != nullptr;
 
     std::string err;
+    if (bench) return run_indicator_bench(data_file);
     if (bt_id) return run_backtest_cli(bt_id, bt_from, bt_to, bt_sets, data_file, bt_csv, cost);
     if (data_file) {  // a file from export_bars.py: no download
         if (!g.m.load(data_file, err)) {

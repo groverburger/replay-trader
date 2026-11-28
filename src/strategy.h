@@ -52,6 +52,7 @@ private:
     void fail(const std::string& e);
     lua_State* L_ = nullptr;
     int ref_ = -2, ctx_ref_ = -2, p_ref_ = -2;  // definition, ctx and params tables
+    int on_bar_ref_ = -2, keys_ref_ = -2;      // def.on_bar (if any) and the bar table's field names, looked up once
     Broker* b_ = nullptr;
     const Market* m_ = nullptr;
     const Agg* agg_ = nullptr;

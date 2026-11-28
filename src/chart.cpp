@@ -4,11 +4,13 @@
 
 #include "chart.h"
 #include "datafeed.h"
+#include "indworker.h"
 
 #include <algorithm>
 #include <cfloat>
 #include <climits>
 #include <map>
+#include <memory>
 #include <cstdarg>
 #include <cmath>
 #include <cstdio>
@@ -149,13 +151,19 @@ float text_w(const std::string& s, float size) {
 // ---------------------------------------------------------------- model: computed once per frame in chart_prepare
 using Vec = std::vector<double>;
 
+const std::shared_ptr<const IndOutput>& empty_output() {
+    static const std::shared_ptr<const IndOutput> e = std::make_shared<IndOutput>();
+    return e;
+}
+
 // An indicator's output for the current series, with what's needed to draw it.
 struct IndResult {
     int uid = 0;
     const ScriptDef* def = nullptr;
     std::string label;
     Rgba col{1, 1, 1, 1};
-    IndOutput out;
+    std::shared_ptr<const IndOutput> out = empty_output();  // shared with g_cache, not copied each frame
+    std::string error;
     Rgba plot_color(size_t k) const {
         const PlotDef& p = def->plots[k];
         Rgba c = p.has_color ? p.color : col;
@@ -177,23 +185,38 @@ struct Model {
     size_t n = 0;                    // series length the results were computed for
 } M;
 
-// Indicator results are recomputed only when the series, the params or the scripts change.
+// Indicator results are recomputed only when the series, the params or the scripts change. With g_async, a
+// result that is behind only on the series (the replay advanced, the view panned) stays on screen, lined up by its
+// x0, while the worker computes the new one; anything else (new params, timeframe or scripts, a jump) runs here.
 struct CachedResult {
-    long series = -1;
-    int gen = -1;
+    long series = -1;                  // g.s_version of `out`
+    long queued = -1;                  // g.s_version last sent to the worker
+    int gen = -1, tf = 0;
     std::string script;
     Params params;
-    IndOutput out;
+    std::shared_ptr<IndOutput> out;
 };
 std::map<int, CachedResult> g_cache;   // by indicator uid
+bool g_async = false;
+IndWorker g_worker;
+std::shared_ptr<const Series> g_snap;  // g.s as last sent to the worker
+long g_snap_version = -1;
 std::map<int, std::string> g_errors;   // last error reported per indicator
 
-void fit(double& lo, double& hi, std::initializer_list<const Vec*> ys, double pad_frac) {
+// The visible bars as indices into a vector whose element 0 is absolute bucket `base` (an indicator result may
+// come from an earlier series than g.s; see IndOutput::x0).
+void visible_in(long& k0, long& k1, int64_t base) {
+    visible_range(k0, k1);
+    long off = static_cast<long>(g.s.x0 - base);
+    k0 += off, k1 += off;
+}
+
+void fit(double& lo, double& hi, std::initializer_list<const Vec*> ys, double pad_frac, int64_t base) {
     long j0, j1;
-    visible_range(j0, j1);
+    visible_in(j0, j1, base);
     lo = INFINITY, hi = -INFINITY;
     for (auto* y : ys)
-        for (long j = j0; j <= j1 && j < static_cast<long>(y->size()); ++j)
+        for (long j = std::max(0L, j0); j <= j1 && j < static_cast<long>(y->size()); ++j)
             if (std::isfinite((*y)[j])) lo = std::min(lo, (*y)[j]), hi = std::max(hi, (*y)[j]);
     if (!std::isfinite(lo)) {
         lo = 0, hi = 1;
@@ -279,9 +302,9 @@ struct ChartState {
 } C;
 
 // ---------------------------------------------------------------- drawing
-void draw_series_line(const Painter& P, const Layout& L, const Pane& pn, const Vec& y, Rgba c, float w) {
+void draw_series_line(const Painter& P, const Layout& L, const Pane& pn, const Vec& y, int64_t base, Rgba c, float w) {
     long j0, j1;
-    visible_range(j0, j1);
+    visible_in(j0, j1, base);
     j0 = std::max(0L, j0 - 1), j1 = std::min(static_cast<long>(y.size()) - 1, j1 + 1);
     long step = std::max(1L, static_cast<long>(1.0 / std::max(1e-9, L.ppb() * px_scale())));  // about one point per device pixel
     std::vector<ImVec2> run;
@@ -291,34 +314,37 @@ void draw_series_line(const Painter& P, const Layout& L, const Pane& pn, const V
             run.clear();
             continue;
         }
-        run.push_back(ImVec2(L.px(static_cast<double>(g.s.x0 + j)), static_cast<float>(pn.py(y[j]))));
+        run.push_back(ImVec2(L.px(static_cast<double>(base + j)), static_cast<float>(pn.py(y[j]))));
     }
     P.polyline(run, w * L.s, c, pn.box);
 }
 
 // Histogram bars from zero; by_bar colours each by its candle's direction (alpha from c).
-void draw_bars(const Painter& P, const Layout& L, const Pane& pn, const Vec& y, Rgba c, bool by_bar = false) {
+void draw_bars(const Painter& P, const Layout& L, const Pane& pn, const Vec& y, int64_t base, Rgba c, bool by_bar) {
     long j0, j1;
-    visible_range(j0, j1);
-    float half = std::max(0.5f / px_scale(), static_cast<float>(L.ppb() * 0.35)), base = pn.py(std::clamp(0.0, pn.ymin, pn.ymax));
-    for (long j = j0; j <= j1 && j < static_cast<long>(y.size()); ++j)
+    visible_in(j0, j1, base);
+    float half = std::max(0.5f / px_scale(), static_cast<float>(L.ppb() * 0.35)), y0 = pn.py(std::clamp(0.0, pn.ymin, pn.ymax));
+    long sn = static_cast<long>(g.s.n()), off = static_cast<long>(base - g.s.x0);  // y[j] is g.s bar j + off
+    for (long j = std::max(0L, j0); j <= j1 && j < static_cast<long>(y.size()); ++j)
         if (std::isfinite(y[j])) {
-            float px = L.px(static_cast<double>(g.s.x0 + j));
-            Rgba k = by_bar ? (g.s.c[j] >= g.s.o[j] ? kUp : kDown).alpha(c.a) : c;
-            P.rect(px - half, base, px + half, pn.py(y[j]), k, pn.box);
+            float px = L.px(static_cast<double>(base + j));
+            long sj = j + off;
+            Rgba k = c;
+            if (by_bar && sj >= 0 && sj < sn) k = (g.s.c[sj] >= g.s.o[sj] ? kUp : kDown).alpha(c.a);
+            P.rect(px - half, y0, px + half, pn.py(y[j]), k, pn.box);
         }
 }
 
 // Horizontal steps: each bar's value across its own width (levels that change from day to day).
-void draw_steps(const Painter& P, const Layout& L, const Pane& pn, const Vec& y, Rgba c, float w) {
+void draw_steps(const Painter& P, const Layout& L, const Pane& pn, const Vec& y, int64_t base, Rgba c, float w) {
     long j0, j1;
-    visible_range(j0, j1);
+    visible_in(j0, j1, base);
     for (long j = std::max(0L, j0 - 1); j <= j1 + 1 && j < static_cast<long>(y.size()); ++j) {
         if (!std::isfinite(y[j])) continue;
         long k = j;  // extend over the run of equal values
         while (k + 1 < static_cast<long>(y.size()) && k + 1 <= j1 + 1 && y[k + 1] == y[j]) ++k;
         float py = pn.py(y[j]);
-        P.line(L.px(g.s.x0 + j - 0.5), py, L.px(g.s.x0 + k + 0.5), py, w * L.s, c, pn.box);
+        P.line(L.px(base + j - 0.5), py, L.px(base + k + 0.5), py, w * L.s, c, pn.box);
         j = k;
     }
 }
@@ -344,7 +370,7 @@ void draw_candles(const Painter& P, const Layout& L, const Pane& pn) {
     visible_range(j0, j1);
     if (j1 < j0) return;
     if (L.ppb() * px_scale() < 2.0f) {  // under 2 device pixels a bar: a close line
-        draw_series_line(P, L, pn, s.c, {0.85f, 0.85f, 0.85f, 1}, 1.0f);
+        draw_series_line(P, L, pn, s.c, s.x0, {0.85f, 0.85f, 0.85f, 1}, 1.0f);
         return;
     }
     for (long j = j0; j <= j1; ++j) draw_candle(P, L, pn, j, s.c[j] >= s.o[j] ? kUp : kDown);
@@ -352,17 +378,19 @@ void draw_candles(const Painter& P, const Layout& L, const Pane& pn) {
 
 // Indicator bar marks: shaded columns (behind = true, drawn before the candles) or recoloured candles.
 void draw_bar_marks(const Painter& P, const Layout& L, const Pane& pn, const IndResult& r, bool behind) {
-    if (!r.def || !r.out.error.empty() || r.out.bars.empty()) return;
+    if (!r.def || !r.error.empty() || r.out->bars.empty()) return;
     long j0, j1;
     visible_range(j0, j1);
     float half = std::max(1.0f / px_scale(), static_cast<float>(L.ppb()) * 0.5f);
-    for (const IndBarMark& b : r.out.bars) {
-        if (b.i < j0 || b.i > j1 || b.candle == behind) continue;
+    long off = static_cast<long>(r.out->x0 - g.s.x0);  // result bar i is series bar i + off
+    for (const IndBarMark& b : r.out->bars) {
+        long j = b.i + off;
+        if (j < j0 || j > j1 || b.candle == behind) continue;
         Rgba c = r.plot_color(static_cast<size_t>(b.plot));
         if (b.candle) {
-            draw_candle(P, L, pn, b.i, c);
+            draw_candle(P, L, pn, j, c);
         } else {
-            float x = L.px(static_cast<double>(g.s.x0 + b.i));
+            float x = L.px(static_cast<double>(g.s.x0 + j));
             P.rect(x - half, pn.box.y0, x + half, pn.box.y1, c.alpha(c.a * b.alpha), pn.box);
         }
     }
@@ -469,19 +497,19 @@ void tag(const Painter& P, const Layout& L, const Pane& pn, double v, Rgba bg, c
 
 // One indicator's output: fills, then plots in order, then level segments and markers.
 void draw_result(const Painter& P, const Layout& L, const Pane& pn, const IndResult& r) {
-    if (!r.def || !r.out.error.empty()) return;
-    const Series& s = g.s;
+    if (!r.def || !r.error.empty()) return;
+    const int64_t base = r.out->x0;  // indices below are the result's (it may be from an earlier series)
     long j0, j1;
-    visible_range(j0, j1);
+    visible_in(j0, j1, base);
     if (!pn.pm->price)
         for (double lv : r.def->levels) P.line(pn.box.x0, pn.py(lv), pn.box.x1, pn.py(lv), P.hair(), {1, 1, 1, 0.3f}, pn.box);
     for (const FillDef& f : r.def->fills) {
-        const Vec &a = r.out.plots[f.a], &b = r.out.plots[f.b];
+        const Vec &a = r.out->plots[f.a], &b = r.out->plots[f.b];
         std::vector<ImVec2> v;
         ImU32 col = u32(r.plot_color(f.a).alpha(f.alpha));
         for (long j = std::max(0L, j0 - 1); j <= j1 && j + 1 < static_cast<long>(a.size()); ++j) {
             if (!std::isfinite(a[j]) || !std::isfinite(a[j + 1]) || !std::isfinite(b[j]) || !std::isfinite(b[j + 1])) continue;
-            float xa = L.px(s.x0 + j), xb = L.px(s.x0 + j + 1);
+            float xa = L.px(base + j), xb = L.px(base + j + 1);
             v.push_back({xa, pn.py(a[j])});
             v.push_back({xa, pn.py(b[j])});
             v.push_back({xb, pn.py(a[j + 1])});
@@ -493,23 +521,23 @@ void draw_result(const Painter& P, const Layout& L, const Pane& pn, const IndRes
         const PlotDef& p = r.def->plots[k];
         Rgba c = r.plot_color(k);
         switch (p.style) {
-            case PlotDef::Line: draw_series_line(P, L, pn, r.out.plots[k], c, p.width); break;
-            case PlotDef::Step: draw_steps(P, L, pn, r.out.plots[k], c, p.width); break;
-            case PlotDef::Histogram: draw_bars(P, L, pn, r.out.plots[k], c, p.color_by_bar); break;
+            case PlotDef::Line: draw_series_line(P, L, pn, r.out->plots[k], base, c, p.width); break;
+            case PlotDef::Step: draw_steps(P, L, pn, r.out->plots[k], base, c, p.width); break;
+            case PlotDef::Histogram: draw_bars(P, L, pn, r.out->plots[k], base, c, p.color_by_bar); break;
             case PlotDef::Markers: break;
         }
     }
-    for (const IndSegment& sg : r.out.segments) {
+    for (const IndSegment& sg : r.out->segments) {
         if (sg.i1 < j0 || sg.i0 > j1) continue;
         float y = pn.py(sg.price);
         Rgba c = r.plot_color(static_cast<size_t>(sg.plot));
         c.a *= sg.alpha;
-        P.line(L.px(static_cast<double>(s.x0 + sg.i0)), y, L.px(static_cast<double>(s.x0 + sg.i1)), y, P.hair(), c, pn.box);
+        P.line(L.px(static_cast<double>(base + sg.i0)), y, L.px(static_cast<double>(base + sg.i1)), y, P.hair(), c, pn.box);
     }
     float sz = 4 * L.s, off = 4 * L.s;
-    for (const IndMarker& mk : r.out.markers) {
+    for (const IndMarker& mk : r.out->markers) {
         if (mk.i < j0 || mk.i > j1) continue;
-        float x = L.px(static_cast<double>(s.x0 + mk.i)), y = pn.py(mk.price);
+        float x = L.px(static_cast<double>(base + mk.i)), y = pn.py(mk.price);
         if (!pn.box.in(x, y)) continue;
         Rgba c = r.plot_color(static_cast<size_t>(mk.plot));
         if (mk.up) P.tri(x, y + off, x - sz, y + off + 7 * L.s, x + sz, y + off + 7 * L.s, c);
@@ -607,7 +635,7 @@ void draw_legend(const Painter& P, const Layout& L, const Pane& pn, Rgba text) {
         y += 15 * s;
     };
     auto result_entries = [&](const IndResult& r, bool all_plots) {
-        if (!r.out.error.empty()) {
+        if (!r.error.empty()) {
             entry(r.label + "  (script error, see log)", kSell);
             return;
         }
@@ -990,6 +1018,11 @@ bool chart_animate(double dt) {
 
 bool chart_animating() { return Z.on || Y.moving || g_pan_left != 0; }
 
+void chart_set_async(bool on) {
+    g_async = on;
+    if (on && !g_worker.on_done) g_worker.on_done = poke;  // a finished result redraws the chart
+}
+
 void chart_prepare() {
     update_view();
     const Series& s = g.s;
@@ -998,7 +1031,7 @@ void chart_prepare() {
     M.results.clear();
     M.n = s.n();
     PaneModel price;
-    fit(price.ymin, price.ymax, {&s.l, &s.h}, 0.0);
+    fit(price.ymin, price.ymax, {&s.l, &s.h}, 0.0, s.x0);
     double pad = std::max((price.ymax - price.ymin) * 0.08, 2.0);
     price.ymin -= pad, price.ymax += pad;
     bool jump = g.cursor + 1 < Y.cursor || g.cursor > Y.cursor + 2000;  // new session / start here
@@ -1013,25 +1046,50 @@ void chart_prepare() {
     Y.init = true, Y.tf = g.tf(), Y.cursor = g.cursor, Y.dt = 0;
     price.ymin = Y.lo, price.ymax = Y.hi;
     M.panes.push_back(price);
+    for (IndDone& done : g_worker.take()) {  // results from the worker that still match their indicator
+        for (std::string& m : done.log) g_scripts.messages.push_back(std::move(m));
+        auto it = g_cache.find(done.uid);
+        if (it == g_cache.end()) continue;
+        CachedResult& c = it->second;
+        if (done.gen == c.gen && done.tf == c.tf && done.script == c.script && done.params == c.params && done.series > c.series)
+            c.out = std::move(done.out), c.series = done.series;
+    }
+    long vis0, vis1;
+    visible_range(vis0, vis1);
     for (const Ind& d : g.inds) {
         if (!d.on) continue;
         IndResult r;
         r.uid = d.uid, r.def = d.def(), r.label = d.label(), r.col = d.col;
         if (!r.def) {
-            r.out.error = "script " + d.script + " not found";
+            r.error = "script " + d.script + " not found";
         } else {
             CachedResult& c = g_cache[d.uid];
-            if (c.series != g.s_version || c.gen != g_scripts.generation() || c.script != d.script || c.params != d.params) {
-                run_indicator(*r.def, d.params, s, g.tf(), g.s_version, c.out);
-                c.series = g.s_version, c.gen = g_scripts.generation(), c.script = d.script, c.params = d.params;
+            int gen = g_scripts.generation();
+            bool same = c.out && c.gen == gen && c.tf == g.tf() && c.script == d.script && c.params == d.params;
+            // A stale result can stand in if it starts at or before the view and reaches into it: its newest bars may
+            // lag while the replay plays faster than the worker computes, and catch up when it finishes.
+            int64_t a0 = s.x0 + vis0;
+            bool covers = same && c.out->x0 <= a0 && c.out->x0 + c.out->n > a0 + (vis1 - vis0) / 2;
+            if (c.series != g.s_version && (!same || !g_async || !covers)) {
+                auto out = std::make_shared<IndOutput>();  // a new object: earlier frames' results may still use the old
+                run_indicator(*r.def, d.params, s, g.tf(), g.s_version, *out);
+                c.out = std::move(out);
+                c.series = g.s_version, c.gen = gen, c.tf = g.tf(), c.script = d.script, c.params = d.params;
+            } else if (c.series != g.s_version && c.queued != g.s_version) {
+                if (g_snap_version != g.s_version) g_snap = std::make_shared<Series>(s), g_snap_version = g.s_version;
+                IndJob job;
+                job.uid = d.uid, job.def = *r.def, job.gen = gen, job.params = d.params, job.tf = g.tf();
+                job.series = g.s_version, job.s = g_snap;
+                g_worker.submit(std::move(job));
+                c.queued = g.s_version;
             }
             r.out = c.out;
-            if (r.out.error.empty() && !r.def->error.empty()) r.out.error = r.def->error;
+            r.error = c.out->error.empty() ? r.def->error : c.out->error;
         }
-        if (!r.out.error.empty() && g_errors[d.uid] != r.out.error) {  // report each new error once
-            g_errors[d.uid] = r.out.error;
-            g.broker.log.push_back(r.label + ": " + r.out.error.substr(0, r.out.error.find('\n')));
-            g_scripts.messages.push_back(r.out.error);
+        if (!r.error.empty() && g_errors[d.uid] != r.error) {  // report each new error once
+            g_errors[d.uid] = r.error;
+            g.broker.log.push_back(r.label + ": " + r.error.substr(0, r.error.find('\n')));
+            g_scripts.messages.push_back(r.error);
         }
         M.results.push_back(std::move(r));
         int idx = static_cast<int>(M.results.size()) - 1;
@@ -1047,11 +1105,11 @@ void chart_prepare() {
         } else {
             std::vector<const Vec*> ys;
             for (size_t k = 0; k < res.def->plots.size(); ++k)
-                if (res.def->plots[k].style != PlotDef::Markers && k < res.out.plots.size()) ys.push_back(&res.out.plots[k]);
+                if (res.def->plots[k].style != PlotDef::Markers && k < res.out->plots.size()) ys.push_back(&res.out->plots[k]);
             double lo = INFINITY, hi = -INFINITY;
             for (const Vec* y : ys) {
                 double a, b;
-                fit(a, b, {y}, 0.0);
+                fit(a, b, {y}, 0.0, res.out->x0);
                 if (a != 0 || b != 1) lo = std::min(lo, a), hi = std::max(hi, b);
             }
             if (!std::isfinite(lo)) lo = 0, hi = 1;

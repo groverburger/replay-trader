@@ -67,7 +67,8 @@ void set_script_sink(lua_State* L, std::vector<std::string>* sink);  // where pr
 // Runs a script's source in its own environment and reads its definition table into `def` (keeping a registry
 // reference to the table). Returns false with def.error set.
 bool load_script(lua_State* L, ScriptDef& def);
-// Limits a script call to `seconds` of run time (an endless loop raises an error instead of freezing).
+// Limits the next call_script on L to `seconds` of run time (an endless loop raises an error instead of
+// freezing). A watchdog thread enforces it, so scripts run without a hook until they overrun.
 void set_script_deadline(lua_State* L, double seconds);
 // pcall with a traceback; on error pops nothing and returns the message.
 bool call_script(lua_State* L, int nargs, int nresults, std::string& err);
@@ -102,6 +103,8 @@ struct IndOrder {  // out:order: the entry an indicator wants working (bracket d
     int qty = 0;
 };
 struct IndOutput {
+    int64_t x0 = 0;                          // the series' x0: element i is absolute bucket x0 + i
+    long n = 0;                              // the series' length
     std::vector<std::vector<double>> plots;  // per PlotDef, one value per series bar (NaN where none)
     std::vector<IndMarker> markers;
     std::vector<IndSegment> segments;
@@ -110,8 +113,12 @@ struct IndOutput {
     std::string error;
 };
 // Runs an indicator's calc over the series. `series_key` identifies the series contents (the bars table is
-// built once per key and shared by all indicators).
+// built once per key and shared by all indicators). This one runs in g_scripts.L.
 bool run_indicator(const ScriptDef& d, const Params& p, const Series& s, int tf, long series_key, IndOutput& out);
+// The same in another state (a worker thread's), where load_script(L, d) has set d.ref. `gen` invalidates the
+// cached bars table like series_key does.
+bool run_indicator_in(lua_State* L, int gen, const ScriptDef& d, const Params& p, const Series& s, int tf,
+                      long series_key, IndOutput& out);
 
 class ScriptHost {
 public:

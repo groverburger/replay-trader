@@ -89,19 +89,36 @@ function RMA:update(x)
   return self.value
 end
 
--- Population standard deviation over the last n values.
+-- Population standard deviation over the last n values. Running sums of x - ref (ref: a recent value, so the
+-- sums stay small and exact enough), recomputed from the window every n updates so rounding can't build up.
 local STDEV = class()
-function ta.stdev(n) return setmetatable({ n = n, buf = {}, i = 0, count = 0 }, STDEV) end
+function ta.stdev(n) return setmetatable({ n = n, buf = {}, i = 0, count = 0, s1 = 0, s2 = 0, ref = 0 }, STDEV) end
 function STDEV:update(x)
-  self.i = self.i % self.n + 1
-  self.buf[self.i] = x
-  if self.count < self.n then self.count = self.count + 1 end
-  if self.count < self.n then self.value = nil; return nil end
-  local s = 0
-  for k = 1, self.n do s = s + self.buf[k] end
-  local mean, v = s / self.n, 0
-  for k = 1, self.n do local d = self.buf[k] - mean; v = v + d * d end
-  self.value = sqrt(v / self.n)
+  local n, buf = self.n, self.buf
+  local i = self.i % n + 1
+  self.i = i
+  local old, ref = buf[i], self.ref
+  buf[i] = x
+  if self.count < n then
+    self.count = self.count + 1
+    if self.count == 1 then self.ref, ref = x, x end
+  end
+  if i == n then  -- once per n updates: re-centre on the window's mean and sum it afresh
+    local s = 0
+    for k = 1, self.count do s = s + buf[k] end
+    ref = s / self.count
+    local s1, s2 = 0, 0
+    for k = 1, self.count do local d = buf[k] - ref; s1 = s1 + d; s2 = s2 + d * d end
+    self.ref, self.s1, self.s2 = ref, s1, s2
+  else
+    local d = x - ref
+    local s1, s2 = self.s1 + d, self.s2 + d * d
+    if old then local e = old - ref; s1, s2 = s1 - e, s2 - e * e end
+    self.s1, self.s2 = s1, s2
+  end
+  if self.count < n then self.value = nil; return nil end
+  local m = self.s1 / n
+  self.value = sqrt(max(0, self.s2 / n - m * m))
   return self.value
 end
 
@@ -142,23 +159,31 @@ function MACD:update(x)
   return self.value
 end
 
+-- Highest / lowest of the last n values: a monotonic queue (in a ring of n slots) of the values that can still
+-- become the extreme, best first; O(1) per update on average.
 local EXTREME = class()
-local function extreme(n, better)
-  return setmetatable({ n = n, buf = {}, i = 0, count = 0, better = better }, EXTREME)
+local function extreme(n, hi)
+  return setmetatable({ n = n, hi = hi, t = 0, head = 1, tail = 0, qv = {}, qt = {} }, EXTREME)
 end
-function ta.highest(n) return extreme(n, function(a, b) return a > b end) end
-function ta.lowest(n) return extreme(n, function(a, b) return a < b end) end
+function ta.highest(n) return extreme(n, true) end
+function ta.lowest(n) return extreme(n, false) end
 function EXTREME:update(x)
-  self.i = self.i % self.n + 1
-  self.buf[self.i] = x
-  if self.count < self.n then self.count = self.count + 1 end
-  local best = nil
-  for k = 1, self.count do
-    local v = self.buf[k]
-    if best == nil or self.better(v, best) then best = v end
+  local n, qv, qt, head, tail = self.n, self.qv, self.qt, self.head, self.tail
+  local t = self.t + 1
+  self.t = t
+  -- drop the value leaving the window first, so the queue never holds more than n
+  if tail >= head and qt[(head - 1) % n + 1] <= t - n then head = head + 1 end
+  if self.hi then
+    while tail >= head and qv[(tail - 1) % n + 1] <= x do tail = tail - 1 end
+  else
+    while tail >= head and qv[(tail - 1) % n + 1] >= x do tail = tail - 1 end
   end
-  self.value = best
-  return best
+  tail = tail + 1
+  local slot = (tail - 1) % n + 1
+  qv[slot], qt[slot] = x, t
+  self.head, self.tail = head, tail
+  self.value = qv[(head - 1) % n + 1]
+  return self.value
 end
 
 -- Volume-weighted average price, reset whenever `session` changes (pass time.session(t)).
@@ -231,24 +256,35 @@ function SESSION:update(bar, ctx)
 end
 
 -------------------------------------------------------------------------------- indicator output (used by the app)
+-- Shapes are stored as parallel arrays (no table per shape), with plots as 0-based indices; the app reads them.
 local OUT = class()
 function __new_output(names)
-  local out = setmetatable({ _markers = {}, _segments = {}, _bars = {}, _orders = {} }, OUT)
-  for _, n in ipairs(names) do out[n] = {} end
+  local out = setmetatable({ _pidx = {}, _orders = {},
+                             _mn = 0, _mi = {}, _mp = {}, _mu = {}, _mk = {},              -- markers
+                             _sn = 0, _s0 = {}, _s1 = {}, _sp = {}, _sk = {}, _sa = {},     -- segments
+                             _bn = 0, _bi = {}, _bk = {}, _ba = {}, _bc = {} }, OUT)        -- bar marks
+  for k, n in ipairs(names) do out[n] = {}; out._pidx[n] = k - 1 end
   return out
 end
 -- A triangle at bar i: dir "up" (below the price, pointing up) or "down" (above, pointing down).
 function OUT:marker(i, price, dir, plot)
-  self._markers[#self._markers + 1] = { i, price, dir == "up", plot }
+  local k = self._mn + 1
+  self._mn = k
+  self._mi[k], self._mp[k], self._mu[k], self._mk[k] = i, price, dir == "up", self._pidx[plot] or 0
 end
 -- A horizontal line from bar i0 to bar i1 at price.
 function OUT:segment(i0, i1, price, plot, alpha)
-  self._segments[#self._segments + 1] = { i0, i1, price, plot, alpha or 1 }
+  local k = self._sn + 1
+  self._sn = k
+  self._s0[k], self._s1[k], self._sp[k], self._sk[k], self._sa[k] = i0, i1, price, self._pidx[plot] or 0, alpha or 1
+end
+local function bar_mark(self, i, plot, alpha, candle)
+  local k = self._bn + 1
+  self._bn = k
+  self._bi[k], self._bk[k], self._ba[k], self._bc[k] = i, self._pidx[plot] or 0, alpha, candle
 end
 -- Bar i's candle drawn in the plot's colour instead of green/red.
-function OUT:bar_color(i, plot)
-  self._bars[#self._bars + 1] = { i, plot, 1, true }
-end
+function OUT:bar_color(i, plot) bar_mark(self, i, plot, 1, true) end
 -- The entry order this indicator wants working now (indicators with `trades = true`). Call it once, for the
 -- latest bar; the replay keeps one order per indicator in step with the latest call, moving or cancelling it
 -- as the calls change, while the indicator's Auto-trade box is ticked and the position is flat.
@@ -259,9 +295,7 @@ function OUT:order(side, kind, price, opts)
                                       opts.qty or 0 }
 end
 -- A shaded column behind bar i, full pane height, in the plot's colour (alpha defaults to 0.15).
-function OUT:highlight(i, plot, alpha)
-  self._bars[#self._bars + 1] = { i, plot, alpha or 0.15, false }
-end
+function OUT:highlight(i, plot, alpha) bar_mark(self, i, plot, alpha or 0.15, false) end
 
 -------------------------------------------------------------------------------- strategy context (used by the app)
 function __make_ctx(core)

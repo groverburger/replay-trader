@@ -52,15 +52,28 @@ present it (about 75 fps).
 |---|---|
 | `RT_FRAME_LOG=1` | Log every frame's CPU time, presentation wait and interval to stderr, with a summary on exit |
 | `RT_BENCH=pan`, `zoom`, `wheel`, `scroll`, `scrollwheel` | Replay 4 s of synthetic scrolling over the chart or the sidebar in the real window, print frame-time statistics and quit |
+| `RT_BENCH=play` | The same, with the replay advancing a minute every frame (indicators recompute each time). With `--demo`, `RT_SHOT_INDS` and `--start` for a repeatable run |
+| `RT_BENCH_ZOOM=300` | With `RT_BENCH`: start zoomed out that far (lots of bars, pivots and levels) |
+| `RT_IND_SYNC=1` | Compute indicators on the UI thread, as screenshots do, instead of on the worker |
 
-**Scripting.** Each script runs in its own environment on top of the prelude. Scripts get no file or OS access,
-and a time-limit hook stops runaway loops.
+`--bench-indicators` times every indicator (default params) on a 60,000-bar series at 1m, 5m and 15m and prints
+an order-independent checksum of each output, to confirm that a rewrite draws the same thing. On an M-series Mac
+at 1m: swing pivots 6 ms, Bollinger 12 ms, VWAP 9 ms, volume profile 17 ms.
 
-- **Indicators** run on the UI thread, once per change of the visible series, params or scripts (cached per
-  indicator).
+**Scripting.** Each script runs in its own environment on top of the prelude. Scripts get no file or OS access.
+Runaway loops are stopped by a time limit per call. A watchdog thread enforces it: it installs a Lua hook only
+once a call has overrun, with the script's thread interrupted (a signal, or a suspend on Windows). A
+permanent count hook would make Lua 5.4 dispatch every instruction through the hook, at about half the speed.
+
+- **Indicators** are cached per indicator and recomputed when the visible series, params or scripts change. A new
+  param, timeframe or script set, or a jump, recomputes on the UI thread, so edits show at once. When only the
+  series moved on (the replay played, the view panned), the chart keeps drawing the previous result, lined up
+  by its `x0`, while `IndWorker` (`src/indworker.cpp`) computes the new one in its own Lua state. So a slow
+  script never holds up a frame; its newest bars just lag while the replay plays faster than it computes.
+  Shapes (`out:marker` and the rest) go back to C as parallel arrays, not a table per shape.
 - **Live strategies** share that Lua state and run on the replay's broker.
 - **Backtests** load the strategy into their own Lua state on a worker thread and run it on a private broker
-  over the shared, read-only market. That takes about 0.1–0.4 s per year of 1-minute data.
+  over the shared, read-only market. That takes about 0.05–0.3 s per year of 1-minute data.
 
 Backtests can run on `qc_roll_schedule(m)` (`src/datafeed.cpp`), a copy of the market that rolls on
 QuantConnect's schedule. That schedule was determined empirically by comparing against QuantConnect backtests; the
