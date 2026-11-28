@@ -3,6 +3,7 @@
 // fields (drag to scrub, click to type an expression), rows of evenly split widgets, and smooth scrolling.
 
 #include <algorithm>
+#include <cstdarg>
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
@@ -264,6 +265,15 @@ bool text_field(const char* label, char* buf, size_t size, float width, const ch
     return r;
 }
 
+std::string fmt_str(const char* f, ...) {
+    char buf[256];
+    va_list ap;
+    va_start(ap, f);
+    std::vsnprintf(buf, sizeof buf, f, ap);
+    va_end(ap);
+    return buf;
+}
+
 std::string money(double v) {
     char buf[32];
     std::snprintf(buf, sizeof buf, "%+.0f", v);
@@ -284,6 +294,7 @@ struct {
     char date[32] = "2024-08-05 09:25";
     char bt_from[16] = "", bt_to[16] = "";
     bool bt_dates = false;
+    int bt_shown_sel = -2;   // the selection the trade list last scrolled to
     int add_index = 0;
     int strat_gen = -1;
 } P;
@@ -318,6 +329,59 @@ void param_widgets(const ScriptDef& d, Params& p) {
 }
 
 // ---------------------------------------------------------------- panels
+// Session colours: one row per band (on, name, start, end, colour, remove), New York time.
+void sessions_editor() {
+    if (!ImGui::TreeNode("Sessions (New York time)")) return;
+    auto time_field = [](const char* id, int& minutes, float w) {
+        char buf[8];
+        std::snprintf(buf, sizeof buf, "%02d:%02d", minutes / 60, minutes % 60);
+        ImGui::SetNextItemWidth(w);
+        if (ImGui::InputText(id, buf, sizeof buf, ImGuiInputTextFlags_CharsDecimal | ImGuiInputTextFlags_AutoSelectAll)) {
+            int h, m;
+            if (std::sscanf(buf, "%d:%d", &h, &m) == 2 && h >= 0 && h <= 24 && m >= 0 && m < 60)
+                minutes = std::min(24 * 60, h * 60 + m) % (24 * 60);
+            else if (std::sscanf(buf, "%d", &h) == 1 && h >= 100 && h <= 2400 && h % 100 < 60)  // 0930
+                minutes = (h / 100 * 60 + h % 100) % (24 * 60);
+        }
+    };
+    int remove = -1;
+    float s = ImGui::GetStyle().ItemSpacing.x, fh = ImGui::GetFrameHeight();
+    for (size_t k = 0; k < g.bands.size(); ++k) {
+        Band& b = g.bands[k];
+        ImGui::PushID(static_cast<int>(k));
+        float avail = ImGui::GetContentRegionAvail().x, tw = std::round(fh * 2.3f);
+        ImGui::Checkbox("##on", &b.on);
+        ImGui::SameLine();
+        ImGui::SetNextItemWidth(avail - (fh + s) * 3 - (tw + s) * 2 - ImGui::CalcTextSize("-").x - s);
+        ImGui::InputText("##name", b.name, sizeof b.name);
+        ImGui::SameLine();
+        time_field("##start", b.start, tw);
+        ImGui::SameLine(0, s * 0.5f);
+        ImGui::TextUnformatted("-");
+        ImGui::SameLine(0, s * 0.5f);
+        time_field("##end", b.end, tw);
+        ImGui::SameLine();
+        float c[4] = {b.col.r, b.col.g, b.col.b, b.col.a};
+        if (ImGui::ColorEdit4("##col", c, ImGuiColorEditFlags_NoInputs | ImGuiColorEditFlags_AlphaBar | ImGuiColorEditFlags_AlphaPreviewHalf))
+            b.col = {c[0], c[1], c[2], c[3]};
+        ImGui::SameLine();
+        if (close_button("x")) remove = static_cast<int>(k);
+        ImGui::PopID();
+    }
+    if (remove >= 0) g.bands.erase(g.bands.begin() + remove);
+    Row r{1, 1};
+    if (button("+ Add session", r.next())) {
+        Band b;
+        std::snprintf(b.name, sizeof b.name, "Session %zu", g.bands.size() + 1);
+        b.start = 10 * 60, b.end = 11 * 60, b.col = {0.3f, 0.8f, 0.6f, 0.06f};
+        g.bands.push_back(b);
+    }
+    if (button("Defaults", r.next())) g.bands = default_bands();
+    dim_wrapped("A bar takes the colour of the first ticked session holding its start time. The colour swatch sets "
+                "the opacity too.");
+    ImGui::TreePop();
+}
+
 void replay_panel() {
     {
         std::string clock = fmt_time(g.now(), g.hide_dates ? "%H:%M NY" : "%a %Y-%m-%d %H:%M NY");
@@ -344,6 +408,9 @@ void replay_panel() {
     ImGui::Checkbox("Skip overnight", &g.rth_only);
     ImGui::Checkbox("Hide dates", &g.hide_dates);
     ImGui::Checkbox("09:30 / 16:00 lines", &g.sessions);
+    ImGui::SameLine();
+    ImGui::Checkbox("Session colours", &g.bands_on);
+    if (g.bands_on) sessions_editor();
 
     Row r3{1, 0.6f};
     if (text_field("", P.date, sizeof P.date, r3.next(), "YYYY-MM-DD HH:MM", true)) start_at(P.date);
@@ -374,47 +441,107 @@ void ticket_panel() {
         b.commission = g.instrument ? 0.62 : 2.15;
     }
     ImGui::EndDisabled();
-    number_int("Qty", g.qty, 1, 100, r.next());
+    if (g.risk_size) {
+        double risk = g.risk_usd;
+        if (number("Risk", risk, 1, 1e6, 10, 0, r.next(), " $")) g.risk_usd = risk;
+    } else {
+        number_int("Qty", g.qty, 1, 100, r.next());
+    }
     Row r2{1, 1};
     number_int("Slippage", b.slip_ticks, 0, 20, r2.next(), " ticks");
     number("Fee", b.commission, 0, 20, 0.01, 2, r2.next(), " $/side");
     ImGui::Checkbox("Limit fills on touch", &b.limit_touch);
-    ImGui::Checkbox("Bracket (stop + target on fill)", &g.bracket);
-    ImGui::BeginDisabled(!g.bracket);
-    Row r3{1, 1};
-    number("Stop", g.stop_pts, 0, 1000, 0.25, 2, r3.next(), " pt");
-    number("Target", g.target_pts, 0, 1000, 0.25, 2, r3.next(), " pt");
-    ImGui::EndDisabled();
+    ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.5f + ImGui::GetCursorPosX() * 0.5f);
+    ImGui::Checkbox("Size from risk $", &g.risk_size);
 
-    Row r4{1, 1, 1};
+    // bracket: a stop and up to two targets, in points or ATRs
+    ImGui::Checkbox("Bracket", &g.bracket);
+    ImGui::SameLine();
+    {
+        float avail = ImGui::GetContentRegionAvail().x, sp = ImGui::GetStyle().ItemSpacing.x;
+        float bw = std::floor((avail - sp) / 2);
+        if (toggle_button("Points", g.br_unit == 0, bw)) g.br_unit = 0;
+        ImGui::SameLine();
+        if (toggle_button("ATR", g.br_unit == 1, bw)) g.br_unit = 1;
+    }
+    ImGui::BeginDisabled(!g.bracket);
+    double atr = atr_pts();
+    if (g.br_unit == 1) {
+        static std::vector<std::string> tfs;
+        if (tfs.empty())
+            for (int k = 0; k < kNumTfs - 1; ++k) tfs.push_back(kTfNames[k]);  // intraday ATRs and 1D
+        Row ra{1, 1};
+        g.atr_tf_idx = std::min(g.atr_tf_idx, kNumTfs - 2);
+        combo("##atrtf", "ATR on", g.atr_tf_idx, tfs, ra.next());
+        number_int("Length", g.atr_len, 2, 200, ra.next());
+        Row r3{1, 1, 1};
+        number("Stop", g.stop_atr, 0, 50, 0.05, 2, r3.next(), " ATR");
+        number("Tgt 1", g.t1_atr, 0, 50, 0.05, 2, r3.next(), " ATR");
+        number("Tgt 2", g.t2_atr, 0, 50, 0.05, 2, r3.next(), " ATR");
+    } else {
+        Row r3{1, 1, 1};
+        number("Stop", g.stop_pts, 0, 1000, 0.25, 2, r3.next(), " pt");
+        number("Tgt 1", g.target_pts, 0, 1000, 0.25, 2, r3.next(), " pt");
+        number("Tgt 2", g.target2_pts, 0, 1000, 0.25, 2, r3.next(), " pt");
+    }
+    double stop, t1, t2;
+    bracket_now(stop, t1, t2);
+    int q = order_qty();
+    ImGui::BeginDisabled(t2 <= 0 || t1 <= 0);
+    {
+        Row r4{1, 1};
+        number_int("Tgt 1 takes", g.t1_pct, 1, 99, r4.next(), " %");
+        int q1 = t2 > 0 && t1 > 0 ? std::clamp(static_cast<int>(std::lround(q * g.t1_pct / 100.0)), 0, q) : q;
+        ImGui::SameLine();
+        ImGui::AlignTextToFramePadding();
+        dim_text(t2 > 0 && t1 > 0 ? fmt_str("of %d: %d at Tgt 1, %d at Tgt 2", q, q1, q - q1) : "Tgt 2 off: Tgt 1 takes all");
+        (void)r4;
+    }
+    ImGui::EndDisabled();
+    ImGui::EndDisabled();
+    {
+        std::string s;
+        if (g.br_unit == 1)
+            s = atr > 0 ? fmt_str("ATR(%d, %s) %.2f pt.  ", g.atr_len, kTfNames[g.atr_tf_idx], atr) : "ATR: not enough bars yet.  ";
+        if (g.bracket && stop > 0) s += fmt_str("Stop %.2f pt = $%.0f risk on %d.", stop, stop * b.mult * q, q);
+        else if (g.bracket) s += "No stop.";
+        else s += "No bracket: entries go in naked.";
+        if (g.bracket && (t1 > 0 || t2 > 0)) s += fmt_str("  Tgt %.2f%s pt.", t1, t2 > 0 ? fmt_str(" / %.2f", t2).c_str() : "");
+        dim_wrapped(s);
+    }
+
+    Row r5{1, 1, 1};
     float tall = std::round(ImGui::GetFrameHeight() * 1.4f);
-    if (button("\xE2\x96\xB2  Buy Mkt (B)", r4.next(), tall)) market_order(1, g.qty);
-    if (button("\xE2\x96\xBC  Sell Mkt (S)", r4.next(), tall)) market_order(-1, g.qty);
-    if (button("Flatten (X)", r4.next(), tall)) flatten();
-    Row r5{1, 1};
-    if (button("\xE2\x86\x94  Reverse", r5.next())) reverse();
-    if (button("Cancel orders (C)", r5.next())) b.cancel_all();
+    std::string buy = fmt_str("\xE2\x96\xB2  Buy %d  (B)", q), sell = fmt_str("\xE2\x96\xBC  Sell %d  (S)", q);
+    if (button(buy.c_str(), r5.next(), tall)) market_order(1, q);
+    if (button(sell.c_str(), r5.next(), tall)) market_order(-1, q);
+    if (button("Flatten (X)", r5.next(), tall)) flatten();
+    Row r6{1, 1};
+    if (button("\xE2\x86\x94  Reverse", r6.next())) reverse();
+    if (button("Cancel orders (C)", r6.next())) b.cancel_all();
 
     if (g.ticket_price == 0) g.ticket_price = g.last();
-    Row r6{1, 0.3f};
-    if (number("Price", g.ticket_price, 0, 1e6, kTick, 2, r6.next())) g.ticket_price = round_tick(g.ticket_price);
-    if (button("Last", r6.next())) g.ticket_price = g.last();
-    Row r7{1, 1, 1, 1};
-    if (button("Buy Lmt", r7.next())) pending_order(1, OrderType::Limit, g.ticket_price);
-    if (button("Sell Lmt", r7.next())) pending_order(-1, OrderType::Limit, g.ticket_price);
-    if (button("Buy Stp", r7.next())) pending_order(1, OrderType::Stop, g.ticket_price);
-    if (button("Sell Stp", r7.next())) pending_order(-1, OrderType::Stop, g.ticket_price);
-    dim_text("Market orders fill at the next minute's open: step or play.");
+    Row r7{1, 0.3f};
+    if (number("Price", g.ticket_price, 0, 1e6, kTick, 2, r7.next())) g.ticket_price = round_tick(g.ticket_price);
+    if (button("Last", r7.next())) g.ticket_price = g.last();
+    Row r8{1, 1, 1, 1};
+    if (button("Buy Lmt", r8.next())) pending_order(1, OrderType::Limit, g.ticket_price);
+    if (button("Sell Lmt", r8.next())) pending_order(-1, OrderType::Limit, g.ticket_price);
+    if (button("Buy Stp", r8.next())) pending_order(1, OrderType::Stop, g.ticket_price);
+    if (button("Sell Stp", r8.next())) pending_order(-1, OrderType::Stop, g.ticket_price);
+    dim_wrapped("Or right-click the chart at a price. Market orders fill at the next minute's open.");
 }
 
 std::string order_text(const Order& o) {
-    char buf[96];
+    const Broker& b = g.broker;
     const char* type = o.type == OrderType::Market ? "MKT" : o.type == OrderType::Limit ? "LMT" : "STP";
+    if (o.reduce_only && b.pos && o.side == (b.pos > 0 ? -1 : 1) && o.type != OrderType::Market) {
+        double pnl = (o.price - b.avg) * (b.pos > 0 ? 1 : -1) * o.qty * b.mult;
+        return fmt_str("%s %d @ %.2f  %s", o.type == OrderType::Stop ? "STOP" : "TARGET", o.qty, o.price, money_k(pnl).c_str());
+    }
     if (o.type == OrderType::Market)
-        std::snprintf(buf, sizeof buf, "%s %d  next open%s", type, o.qty, o.reduce_only ? "  (bracket)" : "");
-    else
-        std::snprintf(buf, sizeof buf, "%s %d @ %.2f%s", type, o.qty, o.price, o.reduce_only ? "  (bracket)" : "");
-    return buf;
+        return fmt_str("%s %d  next open%s", type, o.qty, o.reduce_only ? "  (exit)" : "");
+    return fmt_str("%s %d @ %.2f", type, o.qty, o.price);
 }
 
 void position_panel() {
@@ -431,13 +558,35 @@ void position_panel() {
     color_text(net + u >= 0 ? kBuy : kSell, "Total " + money(net + u));
     std::snprintf(buf, sizeof buf, "Closed P&L is after $%.2f fees.", b.fees);
     dim_text(buf);
+    if (b.pos) {  // managing the position: scale in and out, move the stop
+        int n = std::abs(b.pos), q = order_qty();
+        Row r{1, 1, 1};
+        std::string add = fmt_str("+ Add %d (A)", q), half = fmt_str("- Close %d (H)", std::max(1, n / 2));
+        if (button(add.c_str(), r.next())) add_to_position();
+        if (button(half.c_str(), r.next())) scale_out(std::max(1, n / 2));
+        if (button("- Close 1", r.next())) scale_out(1);
+        Row r2{1, 1};
+        if (button("Stop to breakeven (E)", r2.next())) stop_to_breakeven();
+        if (button("Flatten (X)##position", r2.next())) flatten();
+        double risk = 0, reward = 0;
+        bool stop = false;
+        for (const Order& o : b.orders) {
+            if (!o.reduce_only || o.type == OrderType::Market || o.side != (b.pos > 0 ? -1 : 1)) continue;
+            double v = (o.price - b.avg) * (b.pos > 0 ? 1 : -1) * o.qty * b.mult;
+            if (o.type == OrderType::Stop) risk += v, stop = true;
+            else reward += v;
+        }
+        dim_text(stop ? fmt_str("At the stop %s.   At the targets %s.", money_k(risk).c_str(), money_k(reward).c_str())
+                      : "No stop on this position: right-click the chart to set one.");
+    }
     int cancel = 0;
     for (const Order& o : g.broker.orders) {
+        if (o.managed && o.qty <= 0) continue;
         ImGui::PushID(o.id);
         float x = ImGui::GetCursorPosX(), w = ImGui::GetContentRegionAvail().x;
         ImGui::AlignTextToFramePadding();
         color_text(o.side > 0 ? kBuy : kSell, o.side > 0 ? "BUY" : "SELL");
-        ImGui::SameLine(x + w * 0.23f);
+        ImGui::SameLine(x + w * 0.16f);
         ImGui::TextUnformatted(order_text(o).c_str());
         ImGui::SameLine(x + w - ImGui::GetFrameHeight());
         if (close_button("x")) cancel = o.id;
@@ -489,6 +638,39 @@ void indicators_panel() {
             ImGui::PopStyleColor();
         } else if (def) {
             param_widgets(*def, d.params);
+            if (def->trades) {  // auto-trading: the indicator's entry order, on the timeframe it was ticked on
+                bool on = d.trade;
+                int tfk = 0;
+                for (int k = 0; k < kNumTfs; ++k)
+                    if (kTfs[k] == d.trade_tf) tfk = k;
+                Row r{1, 1};
+                ImGui::SetNextItemWidth(r.w[0]);
+                if (ImGui::Checkbox("Auto-trade", &on)) set_ind_trade(d, on);
+                static std::vector<std::string> tfs;
+                if (tfs.empty())
+                    for (int k = 0; k < kNumTfs - 1; ++k) tfs.push_back(std::string(kTfNames[k]) + " bars");
+                ImGui::SameLine(ImGui::GetCursorPosX() + r.w[0] + ImGui::GetStyle().ItemSpacing.x);
+                tfk = std::min(tfk, kNumTfs - 2);
+                if (combo("##tradetf", "on", tfk, tfs, r.w[1])) {
+                    d.trade_tf = kTfs[tfk];
+                    if (d.trade && d.order_id) g.broker.cancel(d.order_id), d.order_id = 0;
+                    if (d.trade) ind_trading();
+                }
+                if (d.trade) {
+                    const Order* mine = nullptr;
+                    for (const Order& o : g.broker.orders)
+                        if (o.id == d.order_id) mine = &o;
+                    if (mine) color_text(mine->side > 0 ? kBuy : kSell, "Working: " + order_text(*mine));
+                    else if (g.broker.pos) dim_text("In a position: signals don't enter until flat.");
+                    else dim_text("Waiting for a setup.");
+                    if (d.trade_tf != g.tf()) {
+                        ImGui::PushStyleColor(ImGuiCol_Text, iv(kSell));
+                        ImGui::TextWrapped("Trading %s bars but the chart shows %s: the coloured candles won't match the trades.",
+                                           kTfNames[tfk], kTfNames[g.tf_idx]);
+                        ImGui::PopStyleColor();
+                    }
+                }
+            }
         }
         ImGui::EndChild();
         ImGui::PopStyleColor();
@@ -556,6 +738,35 @@ void trades_panel(float dt) {
     if (button("Reset P&L", r.next())) new_session(g.cursor, "P&L reset");
 }
 
+// Net P&L, fees and win rate by the year each trade closed.
+void by_year_table(const std::vector<RoundTrip>& trips) {
+    auto year_of = [](int64_t t) { int y, mo, d; civil_from_days(floor_div(t, 1440), y, mo, d); return y; };
+    struct Year { int year, n = 0, wins = 0; double net = 0, fee = 0; };
+    std::vector<Year> ys;
+    for (const RoundTrip& t : trips) {
+        int y = year_of(t.t_out);
+        if (ys.empty() || ys.back().year != y) ys.push_back({y});
+        Year& e = ys.back();
+        ++e.n, e.wins += t.pnl > 0, e.net += t.pnl, e.fee += t.fee;
+    }
+    float row_h = ImGui::GetTextLineHeightWithSpacing();
+    float h = row_h * (std::min<int>(static_cast<int>(ys.size()), 12) + 1) + 6;
+    ImGuiTableFlags tf = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_SizingStretchProp;
+    if (!ImGui::BeginTable("##bt_years", 5, tf, ImVec2(-1, h))) return;
+    ImGui::TableSetupScrollFreeze(0, 1);
+    for (const char* c : {"Year", "Trades", "Net", "Fees", "Win"}) ImGui::TableSetupColumn(c);
+    ImGui::TableHeadersRow();
+    for (const Year& e : ys) {
+        ImGui::TableNextRow();
+        ImGui::TableNextColumn(), ImGui::Text("%d", e.year);
+        ImGui::TableNextColumn(), ImGui::Text("%d", e.n);
+        ImGui::TableNextColumn(), color_text(e.net >= 0 ? kBuy : kSell, money_k(e.net));
+        ImGui::TableNextColumn(), ImGui::TextUnformatted(money_k(e.fee).c_str());
+        ImGui::TableNextColumn(), ImGui::Text("%.0f%%", 100.0 * e.wins / e.n);
+    }
+    ImGui::EndTable();
+}
+
 void strategy_panel() {
     std::vector<std::string> names, ids;
     for (const ScriptDef* d : g_scripts.list(true)) {
@@ -614,13 +825,64 @@ void strategy_panel() {
         int64_t from, to;
         if (!d || !d->error.empty()) g.status = "pick a working strategy first";
         else if (!parse_minutes(P.bt_from, from) || !parse_minutes(P.bt_to, to)) g.status = "backtest dates: YYYY-MM-DD";
-        else g.bt.start(*d, g.strat_params, &g.m, from, to + 1440, g.broker, g.bt_qc_rolls);  // "to" is inclusive
+        else {
+            Broker costs = g.broker;  // the ticket's instrument, slippage and fee
+            std::string err;
+            costs.fee_schedule.clear();
+            if (g.bt_fee_by_year) {
+                costs.fee_schedule = g.bt_fees;
+                std::sort(costs.fee_schedule.begin(), costs.fee_schedule.end());
+                if (costs.fee_schedule.empty()) err = g.status = "add at least one year to the fee schedule";
+            }
+            if (err.empty()) g.bt.start(*d, g.strat_params, &g.m, from, to + 1440, costs, g.bt_qc_rolls);  // "to" is inclusive
+        }
     }
     ImGui::EndDisabled();
     ImGui::BeginDisabled(!busy);
     if (button("Stop", r2.next())) g.bt.cancel();
     ImGui::EndDisabled();
     ImGui::Checkbox("QuantConnect roll schedule", &g.bt_qc_rolls);
+    // costs: the order ticket's instrument, slippage and fee, optionally with a fee schedule by year instead
+    auto load = [](const char* hist) {
+        std::string err;
+        parse_fee_schedule(hist, g.bt_fees, err);
+    };
+    ImGui::PushID("btcost");  // the order ticket has fields with the same labels
+    static bool seeded = false;  // start from the historical schedule for the ticket's instrument
+    if (!seeded) seeded = true, load(g.instrument ? kMnqFeeHistory : kNqFeeHistory);
+    ImGui::Checkbox("Fee by year", &g.bt_fee_by_year);
+    if (!g.bt_fee_by_year)
+        dim_wrapped(fmt_str("Costs from the order ticket: %s, %d tick%s slippage, $%.2f/side.", g.instrument ? "MNQ" : "NQ",
+                            g.broker.slip_ticks, g.broker.slip_ticks == 1 ? "" : "s", g.broker.commission));
+    if (g.bt_fee_by_year) {
+        int drop = -1;
+        for (int k = 0; k < static_cast<int>(g.bt_fees.size()); ++k) {
+            ImGui::PushID(k);
+            float x = ImGui::GetFrameHeight() + ImGui::GetStyle().ItemSpacing.x;
+            float avail = ImGui::GetContentRegionAvail().x - x, sp = ImGui::GetStyle().ItemSpacing.x;
+            float w = std::floor((avail - sp) / 2);
+            number_int("From", g.bt_fees[k].first, 1990, 2100, w);
+            ImGui::SameLine();
+            number("Fee", g.bt_fees[k].second, 0, 20, 0.01, 2, w, " $/side");
+            ImGui::SameLine();
+            if (close_button("x")) drop = k;
+            ImGui::PopID();
+        }
+        if (drop >= 0) g.bt_fees.erase(g.bt_fees.begin() + drop);
+        Row rf{1, 1, 1};
+        if (button("+ Year", rf.next())) {
+            std::pair<int, double> last = g.bt_fees.empty() ? std::pair<int, double>{2010, g.broker.commission}
+                                                            : *std::max_element(g.bt_fees.begin(), g.bt_fees.end());
+            g.bt_fees.push_back({last.first + 1, last.second});
+        }
+        if (button("NQ history", rf.next())) load(kNqFeeHistory);
+        if (button("MNQ history", rf.next())) load(kMnqFeeHistory);
+        dim_wrapped(fmt_str("Each fee applies from that year until the next, instead of the ticket's fee (instrument "
+                            "and slippage still come from the ticket: %s, %d tick%s). History: CME exchange + NFA fees "
+                            "plus a $0.85 (NQ) / $0.25 (MNQ) broker commission.", g.instrument ? "MNQ" : "NQ",
+                            g.broker.slip_ticks, g.broker.slip_ticks == 1 ? "" : "s"));
+    }
+    ImGui::PopID();
     const BacktestResult& res = g.bt_result;
     float f = busy ? static_cast<float>(g.bt.progress()) : (res.trips.empty() && res.error.empty() ? 0.0f : 1.0f);
     ImGui::ProgressBar(f, ImVec2(-1, std::round(ImGui::GetFrameHeight() * 0.8f)), "");
@@ -648,9 +910,65 @@ void strategy_panel() {
                           fmt_time(res.from, "%Y-%m-%d").c_str(), fmt_time(res.to, "%Y-%m-%d").c_str(), s.days,
                           res.qc_rolls ? ", QuantConnect rolls" : "");
             dim_wrapped(buf);
+            if (!res.costs.empty()) dim_wrapped("Costs: " + res.costs);
+            ImGui::Checkbox("Results by year", &g.bt_by_year);
+            if (g.bt_by_year) by_year_table(res.trips);
         }
     }
     backtest_curve_draw(std::round(56 * ui_scale()));
+    if (!res.trips.empty() && !busy) {
+        int n = static_cast<int>(res.trips.size());
+        Row rn{1, 1.3f, 1};
+        if (button("\xE2\x97\x80  Prev", rn.next())) step_trade(-1);
+        float w = rn.next(), cx = ImGui::GetCursorPosX();
+        std::string pos = g.bt_sel >= 0 ? "Trade " + std::to_string(g.bt_sel + 1) + " of " + std::to_string(n)
+                                        : std::to_string(n) + " trades";
+        ImGui::SetCursorPosX(cx + std::max(0.0f, (w - ImGui::CalcTextSize(pos.c_str()).x) * 0.5f));
+        ImGui::AlignTextToFramePadding();
+        ImGui::TextUnformatted(pos.c_str());
+        ImGui::SameLine();
+        ImGui::SetCursorPosX(cx + w + ImGui::GetStyle().ItemSpacing.x);
+        if (button("Next  \xE2\x96\xB6", rn.w[2])) step_trade(1);
+        ImGui::Checkbox("Show trades on chart", &g.bt_show);
+        ImGui::SameLine();
+        dim_text("[ and ] step");
+        // the trade list: click a row to jump to that trade
+        float row_h = ImGui::GetTextLineHeightWithSpacing();
+        ImGuiTableFlags tf = ImGuiTableFlags_ScrollY | ImGuiTableFlags_RowBg | ImGuiTableFlags_BordersOuter | ImGuiTableFlags_SizingStretchProp;
+        if (ImGui::BeginTable("##bt_trades", 4, tf, ImVec2(-1, row_h * 9 + 6))) {
+            ImGui::TableSetupScrollFreeze(0, 1);
+            ImGui::TableSetupColumn("#", ImGuiTableColumnFlags_WidthStretch, 0.6f);
+            ImGui::TableSetupColumn("Entry", ImGuiTableColumnFlags_WidthStretch, 2.6f);
+            ImGui::TableSetupColumn("Side", ImGuiTableColumnFlags_WidthStretch, 0.9f);
+            ImGui::TableSetupColumn("P&L", ImGuiTableColumnFlags_WidthStretch, 1.2f);
+            ImGui::TableHeadersRow();
+            bool scroll = P.bt_shown_sel != g.bt_sel && g.bt_sel >= 0;
+            ImGuiListClipper clip;
+            clip.Begin(n);
+            if (scroll) clip.IncludeItemByIndex(g.bt_sel);
+            while (clip.Step()) {
+                for (int k = clip.DisplayStart; k < clip.DisplayEnd; ++k) {
+                    const RoundTrip& t = res.trips[k];
+                    ImGui::TableNextRow();
+                    if (k == g.bt_sel) ImGui::TableSetBgColor(ImGuiTableBgTarget_RowBg1, IM_COL32(66, 110, 190, 150));
+                    ImGui::TableNextColumn();
+                    char id[24];
+                    std::snprintf(id, sizeof id, "%d##tr%d", k + 1, k);
+                    if (ImGui::Selectable(id, false, ImGuiSelectableFlags_SpanAllColumns)) goto_trade(k);
+                    if (scroll && k == g.bt_sel) ImGui::SetScrollHereY(0.5f);
+                    ImGui::TableNextColumn();
+                    ImGui::TextUnformatted(fmt_time(t.t_in, g.hide_dates ? "%H:%M" : "%Y-%m-%d %H:%M").c_str());
+                    ImGui::TableNextColumn();
+                    color_text(t.side > 0 ? kBuy : kSell, t.side > 0 ? "long" : "short");
+                    ImGui::TableNextColumn();
+                    color_text(t.pnl >= 0 ? kBuy : kSell, money_k(t.pnl));
+                }
+            }
+            if (scroll) P.bt_shown_sel = g.bt_sel;
+            ImGui::EndTable();
+        }
+        if (res.qc_rolls) dim_wrapped("Run with the QuantConnect roll schedule: near a roll, trades can sit off the chart's bars.");
+    }
     Row r3{1, 1};
     ImGui::BeginDisabled(res.trips.empty());
     if (button("Export trades", r3.next())) {

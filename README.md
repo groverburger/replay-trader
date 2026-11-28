@@ -47,11 +47,14 @@ Data (about 150 MB), the saved key and exports are stored in `~/Library/Applicat
 | Shift+Right | Finish the current bar |
 | N | Jump to the next 09:30 open |
 | L | Follow the latest bar |
+| [ / ] | Previous / next backtest trade |
 | B / S | Market buy / sell |
+| A | Add to the position |
+| H | Close half the position |
+| E | Move the stop to breakeven |
 | X | Flatten |
 | C | Cancel orders |
-| Cmd/Ctrl+click chart | Limit order at that price |
-| Shift+click chart | Stop order at that price |
+| Right-click chart | Order menu at that price: limit or stop entries, move the stop, add a target |
 | Drag an order line | Move the order |
 | Scroll / drag | Zoom / pan |
 
@@ -59,8 +62,16 @@ Orders fill on the next minute: market orders at the open plus slippage, stops a
 and the open, limits when price trades through by a tick. If a bracket's stop and target are hit in the same
 minute, the stop counts. All times are New York time.
 
+A bracket can be set in points or in multiples of ATR, with up to two targets: target 1 takes a share of each
+entry and target 2 the rest. One stop protects the whole position and resizes as you add or scale out; a filled
+target shrinks it. With **Size from risk $**, each entry's quantity comes from the dollar risk and the stop
+distance. **Session colours** shade the chart by time of day; edit the sessions under the Replay panel.
+
 Command-line options: `--api-key KEY`, `--offline`, `--start "2025-04-09 09:25"`, `--demo`, and
-`--backtest ID --bt-from DATE --bt-to DATE [--set name=value] [--bt-csv FILE]`.
+`--backtest ID --bt-from DATE --bt-to DATE [--set name=value] [--bt-csv FILE]`. Backtest costs default to the
+order ticket's (NQ, 1 tick slippage, $2.15/side); override them with `--instrument mnq`, `--commission $`,
+`--slippage TICKS` or a by-year schedule, `--fees 2010=2.40,2019=2.10`, and add `--by-year` for net P&L and fees
+per year.
 
 ## Lua scripts
 
@@ -83,7 +94,8 @@ return indicator {
 ```
 
 Strategies see only closed bars and fill under the same rules as manual orders. They can auto-trade the replay
-or run as backtests. See [docs/SCRIPTING.md](docs/SCRIPTING.md) for the API.
+or run as backtests. After a backtest, its trades are drawn on the chart; click one in the trade list, or use
+Prev / Next, to jump the replay to it. See [docs/SCRIPTING.md](docs/SCRIPTING.md) for the API.
 
 Backtests are hypothetical. 1-minute bars cannot model queue position or fast-market slippage.
 

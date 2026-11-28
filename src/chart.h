@@ -13,6 +13,9 @@ void chart_prepare();
 // Advances the zoom and pan easing by dt seconds (before chart_prepare); true while still animating.
 bool chart_animate(double dt);
 bool chart_animating();  // after chart_prepare: whether another frame is needed
+// Leaves follow mode and frames chart buckets x0..x1 (current timeframe) with room around them.
+void chart_focus(double x0, double x1);
+void chart_zoom_out(double factor);  // widens the view around its centre (developer screenshots)
 
 // The chart at the current cursor position, w x h interface units.
 void chart_draw(float w, float h);

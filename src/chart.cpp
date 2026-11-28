@@ -9,6 +9,7 @@
 #include <cfloat>
 #include <climits>
 #include <map>
+#include <cstdarg>
 #include <cmath>
 #include <cstdio>
 #include <cstring>
@@ -272,6 +273,7 @@ struct ChartState {
     float mx = 0, my = 0;
     enum { NONE, PAN, ORDER } drag = NONE;
     int order_id = 0;
+    double menu_price = 0;     // the price right-clicked for the order menu
     float press_x = 0;
     double xmin0 = 0, xmax0 = 0;
 } C;
@@ -321,25 +323,79 @@ void draw_steps(const Painter& P, const Layout& L, const Pane& pn, const Vec& y,
     }
 }
 
+// One candle in colour c (the forming bar is drawn translucent). False when bars are too narrow for candles.
+bool draw_candle(const Painter& P, const Layout& L, const Pane& pn, long j, Rgba c) {
+    const Series& s = g.s;
+    float ppb = static_cast<float>(L.ppb());
+    if (ppb * px_scale() < 2.0f) return false;
+    float px = 1.0f / px_scale(), half = std::max(px, ppb * 0.36f), wick = std::max(px, std::floor(L.s * px_scale()) * px);
+    if (j == static_cast<long>(s.n()) - 1 && s.last_partial) c.a = 0.69f;  // forming
+    float x = L.px(static_cast<double>(s.x0 + j));
+    P.rect(x - wick / 2, pn.py(s.h[j]), x + wick / 2, pn.py(s.l[j]), c, pn.box);
+    float top = std::min(pn.py(s.o[j]), pn.py(s.c[j])), bot = std::max(pn.py(s.o[j]), pn.py(s.c[j]));
+    if (bot - top < px) bot = top + px;
+    P.rect(x - half, top, x + half, bot, c, pn.box);
+    return true;
+}
+
 void draw_candles(const Painter& P, const Layout& L, const Pane& pn) {
     const Series& s = g.s;
     long j0, j1;
     visible_range(j0, j1);
     if (j1 < j0) return;
-    float ppb = static_cast<float>(L.ppb());
-    if (ppb * px_scale() < 2.0f) {  // under 2 device pixels a bar: a close line
+    if (L.ppb() * px_scale() < 2.0f) {  // under 2 device pixels a bar: a close line
         draw_series_line(P, L, pn, s.c, {0.85f, 0.85f, 0.85f, 1}, 1.0f);
         return;
     }
-    float px = 1.0f / px_scale(), half = std::max(px, ppb * 0.36f), wick = std::max(px, std::floor(L.s * px_scale()) * px);
-    for (long j = j0; j <= j1; ++j) {
-        Rgba c = s.c[j] >= s.o[j] ? kUp : kDown;
-        if (j == static_cast<long>(s.n()) - 1 && s.last_partial) c.a = 0.69f;  // forming
-        float x = L.px(static_cast<double>(s.x0 + j));
-        P.rect(x - wick / 2, pn.py(s.h[j]), x + wick / 2, pn.py(s.l[j]), c, pn.box);
-        float top = std::min(pn.py(s.o[j]), pn.py(s.c[j])), bot = std::max(pn.py(s.o[j]), pn.py(s.c[j]));
-        if (bot - top < px) bot = top + px;
-        P.rect(x - half, top, x + half, bot, c, pn.box);
+    for (long j = j0; j <= j1; ++j) draw_candle(P, L, pn, j, s.c[j] >= s.o[j] ? kUp : kDown);
+}
+
+// Indicator bar marks: shaded columns (behind = true, drawn before the candles) or recoloured candles.
+void draw_bar_marks(const Painter& P, const Layout& L, const Pane& pn, const IndResult& r, bool behind) {
+    if (!r.def || !r.out.error.empty() || r.out.bars.empty()) return;
+    long j0, j1;
+    visible_range(j0, j1);
+    float half = std::max(1.0f / px_scale(), static_cast<float>(L.ppb()) * 0.5f);
+    for (const IndBarMark& b : r.out.bars) {
+        if (b.i < j0 || b.i > j1 || b.candle == behind) continue;
+        Rgba c = r.plot_color(static_cast<size_t>(b.plot));
+        if (b.candle) {
+            draw_candle(P, L, pn, b.i, c);
+        } else {
+            float x = L.px(static_cast<double>(g.s.x0 + b.i));
+            P.rect(x - half, pn.box.y0, x + half, pn.box.y1, c.alpha(c.a * b.alpha), pn.box);
+        }
+    }
+}
+
+// Session colours: each visible intraday bar's column shaded by the first enabled band holding its start time.
+// Runs of bars in the same band are drawn as one rectangle.
+void draw_bands(const Painter& P, const Layout& L, const Pane& pn) {
+    if (!g.bands_on || g.tf() >= 1440) return;
+    const Series& s = g.s;
+    long j0, j1;
+    visible_range(j0, j1);
+    auto band_of = [&](long j) -> int {
+        int tod = static_cast<int>(((static_cast<int64_t>(s.t[j]) % 1440) + 1440) % 1440);
+        for (size_t k = 0; k < g.bands.size(); ++k) {
+            const Band& b = g.bands[k];
+            if (!b.on || b.start == b.end) continue;
+            bool in = b.start < b.end ? tod >= b.start && tod < b.end : tod >= b.start || tod < b.end;
+            if (in) return static_cast<int>(k);
+        }
+        return -1;
+    };
+    float half = static_cast<float>(L.ppb()) * 0.5f;
+    long run = j0;
+    int cur = j0 <= j1 ? band_of(j0) : -1;
+    for (long j = j0; j <= j1 + 1; ++j) {
+        int b = j <= j1 ? band_of(j) : -2;
+        if (b == cur) continue;
+        if (cur >= 0) {
+            float x0 = L.px(static_cast<double>(s.x0 + run)) - half, x1 = L.px(static_cast<double>(s.x0 + j - 1)) + half;
+            P.rect(x0, pn.box.y0, x1, pn.box.y1, g.bands[static_cast<size_t>(cur)].col, pn.box);
+        }
+        cur = b, run = j;
     }
 }
 
@@ -461,6 +517,44 @@ void draw_result(const Painter& P, const Layout& L, const Pane& pn, const IndRes
     }
 }
 
+// The last backtest's round trips: an entry triangle, a line to the exit (green for a gain, red for a loss) and an
+// exit square; the selected trade is drawn heavier with its number and P&L. Only what the replay has revealed.
+void draw_bt_trades(const Painter& P, const Layout& L, const Pane& pn) {
+    const std::vector<RoundTrip>& tr = g.bt_result.trips;
+    if (!g.bt_show || tr.empty() || g.s.n() == 0) return;
+    long j0, j1;
+    visible_range(j0, j1);
+    if (j1 < j0) return;
+    const Agg& a = g.agg();
+    int64_t tlo = static_cast<int64_t>(g.s.t[j0]), thi = static_cast<int64_t>(g.s.t[j1]) + g.tf(), now = g.now();
+    auto x_of = [&](int64_t t) { return L.px(static_cast<double>(a.bucket_of(g.m.index_before(t + 1)))); };
+    float s = L.s;
+    // round trips are recorded in exit order
+    auto it = std::lower_bound(tr.begin(), tr.end(), tlo, [](const RoundTrip& r, int64_t v) { return r.t_out < v; });
+    for (; it != tr.end() && it->t_in <= thi && it->t_in < now; ++it) {
+        const RoundTrip& r = *it;
+        bool sel = static_cast<int>(it - tr.begin()) == g.bt_sel;
+        float x0 = x_of(r.t_in), y0 = pn.py(r.p_in);
+        if (r.t_out < now) {
+            Rgba c = r.pnl >= 0 ? kBuy : kSell;
+            float x1 = x_of(r.t_out), y1 = pn.py(r.p_out);
+            P.line(x0, y0, x1, y1, (sel ? 2.6f : 1.4f) * s, c.alpha(sel ? 1.0f : 0.75f), pn.box);
+            float q = (sel ? 4.0f : 3.0f) * s;
+            if (pn.box.in(x1, y1)) P.fill(x1 - q, y1 - q, 2 * q, 2 * q, c);
+            if (sel && pn.box.in(x1, y1)) {
+                char buf[48];
+                std::snprintf(buf, sizeof buf, "#%d %s$%.0f", g.bt_sel + 1, r.pnl < 0 ? "-" : "+", std::fabs(r.pnl));
+                bool above = r.side > 0 ? r.pnl >= 0 : r.pnl < 0;  // put the label away from the line
+                P.text(x1 + 6 * s, y1 + (above ? -12 : 12) * s, buf, kFont * s, c);
+            }
+        }
+        if (!pn.box.in(x0, y0)) continue;
+        float w = (sel ? 6.0f : 5.0f) * s, h = (sel ? 10.0f : 8.0f) * s;
+        if (r.side > 0) P.tri(x0, y0, x0 - w, y0 + h, x0 + w, y0 + h, kBuy);
+        else P.tri(x0, y0, x0 - w, y0 - h, x0 + w, y0 - h, kSell);
+    }
+}
+
 // Fills, position, working orders and last price on the price pane.
 void draw_trading(const Painter& P, const Layout& L, const Pane& pn) {
     const Broker& b = g.broker;
@@ -492,9 +586,15 @@ void draw_trading(const Painter& P, const Layout& L, const Pane& pn) {
         bool active = C.drag == ChartState::ORDER && C.order_id == o.id;
         if (o.type == OrderType::Stop) P.dashed_h(y, pn.box.x0, pn.box.x1, c, pn.box, 6 * L.s, 4 * L.s);
         else P.line(pn.box.x0, y, pn.box.x1, y, (active ? 2.4f : 1.6f) * L.s, c, pn.box);
-        char buf[64];
-        std::snprintf(buf, sizeof buf, "%s %s %d", o.side > 0 ? "BUY" : "SELL", o.type == OrderType::Stop ? "STP" : "LMT",
-                      o.qty);
+        char buf[80];
+        if (o.reduce_only && b.pos && o.side == (b.pos > 0 ? -1 : 1)) {  // protecting the position: P&L if it fills
+            double pnl = (o.price - b.avg) * (b.pos > 0 ? 1 : -1) * o.qty * b.mult;
+            std::snprintf(buf, sizeof buf, "%s %d  %s$%.0f", o.type == OrderType::Stop ? "STOP" : "TARGET", o.qty,
+                          pnl < 0 ? "-" : "+", std::fabs(pnl));
+        } else {
+            std::snprintf(buf, sizeof buf, "%s %s %d", o.side > 0 ? "BUY" : "SELL", o.type == OrderType::Stop ? "STP" : "LMT",
+                          o.qty);
+        }
         tag(P, L, pn, o.price, c, buf);
     }
 }
@@ -553,7 +653,7 @@ void draw_hover(const Painter& P, const Layout& L, Rgba text) {
     lines.push_back({buf, text});
     std::snprintf(buf, sizeof buf, "V %.0f   %+.2f", sr.v[j], sr.c[j] - sr.o[j]);
     lines.push_back({buf, sr.c[j] >= sr.o[j] ? kUp : kDown});
-    if (pn->pm->price) lines.push_back({"Cmd+click limit   Shift+click stop", text.alpha(0.5f)});
+    if (pn->pm->price) lines.push_back({"Right-click: orders   drag a line to move it", text.alpha(0.5f)});
     float bw = 0, lh = 15 * s, size = kFont * s;
     for (auto& l : lines) bw = std::max(bw, text_w(l.first, size));
     bw += 16 * s;
@@ -586,13 +686,18 @@ void draw_chart(const Painter& P, const Layout& L) {
     std::vector<double> xt = x_ticks(L);
     for (const Pane& pn : L.panes) {
         P.fill(pn.box.x0, pn.box.y0, pn.box.w(), pn.box.h(), plot_bg);
+        draw_bands(P, L, pn);
         draw_grid(P, L, pn, grid, text.alpha(0.7f), &xt);
         draw_sessions(P, L, pn);
         if (pn.pm->price) {
+            for (int k : M.overlays) draw_bar_marks(P, L, pn, M.results[k], true);
             draw_candles(P, L, pn);
+            for (int k : M.overlays) draw_bar_marks(P, L, pn, M.results[k], false);
             for (int k : M.overlays) draw_result(P, L, pn, M.results[k]);
+            draw_bt_trades(P, L, pn);
             draw_trading(P, L, pn);
         } else if (pn.pm->result >= 0) {
+            draw_bar_marks(P, L, pn, M.results[pn.pm->result], true);
             draw_result(P, L, pn, M.results[pn.pm->result]);
         }
         draw_legend(P, L, pn, text.alpha(0.85f));
@@ -677,6 +782,16 @@ void pan_now(double bars) {
     Z.anchor_x += g.xmin - before;  // a zoom easing at the same time (diagonal swipe) keeps the pan
 }
 
+void focus_view(double x0, double x1) {
+    double span = std::clamp((x1 - x0) * 2.5 + 40, kMinSpan, kMaxSpan);
+    Z.on = false, g_pan_left = 0;
+    g.follow = false;
+    g.visible = span;
+    double mid = 0.5 * (x0 + x1);
+    g.xmin = mid - 0.5 * span, g.xmax = g.xmin + span;
+    clamp_view();
+}
+
 void pan(double bars, bool eased) {  // eased for mouse notches, immediate (1:1) for a trackpad
     if (g.follow) Z.on = false;  // leaving follow mode: the zoom anchor below is about to move
     g.follow = false;
@@ -691,11 +806,12 @@ void chart_input(const Layout& L, ImVec2 origin, bool hovered, bool pressed) {
     float mx = io.MousePos.x - origin.x, my = io.MousePos.y - origin.y;
     const Pane* pn = L.pane_at(mx, my);
     const Pane* price = L.panes.empty() ? nullptr : &L.panes[0];
-    bool ctrl = io.KeyCtrl || io.KeySuper;  // Cmd on macOS
+    if (hovered && pn && pn->pm->price && ImGui::IsMouseClicked(ImGuiMouseButton_Right)) {
+        C.menu_price = round_tick(pn->value(my));
+        ImGui::OpenPopup("##ordermenu");
+    }
     if (pressed && pn) {
-        if (pn->pm->price && (ctrl || io.KeyShift)) {  // Cmd/Ctrl+click: limit, Shift+click: stop
-            click_order(pn->value(my), ctrl);
-        } else if (const Order* o = pn->pm->price ? order_near(L, *pn, my) : nullptr) {
+        if (const Order* o = pn->pm->price ? order_near(L, *pn, my) : nullptr) {
             C.drag = ChartState::ORDER, C.order_id = o->id;
         } else {
             C.drag = ChartState::PAN, C.press_x = mx, C.xmin0 = g.xmin, C.xmax0 = g.xmax;
@@ -767,7 +883,59 @@ void draw_curve(float h, const std::vector<double>& eq_in, const char* empty) {
 
 }  // namespace
 
+void chart_focus(double x0, double x1) { focus_view(x0, x1); }
+void chart_zoom_out(double factor) {  // developer screenshots: widen the view around its centre
+    double mid = 0.5 * (g.xmin + g.xmax), span = std::clamp((g.xmax - g.xmin) * factor, kMinSpan, kMaxSpan);
+    g.visible = span, g.xmin = mid - 0.5 * span, g.xmax = g.xmin + span;
+    clamp_view();
+}
+
 void chart_set_fonts(ImFont* text, ImFont* title) { g_font = text, g_font_title = title; }
+
+namespace {
+std::string strf(const char* f, ...) {
+    char buf[160];
+    va_list ap;
+    va_start(ap, f);
+    std::vsnprintf(buf, sizeof buf, f, ap);
+    va_end(ap);
+    return buf;
+}
+}  // namespace
+
+// The right-click menu: orders at the clicked price, worded by what they do. Entry orders take the ticket's
+// quantity and bracket; with a position, the price can also become its stop or a target.
+void order_menu() {
+    if (!ImGui::BeginPopup("##ordermenu")) return;
+    Broker& b = g.broker;
+    double p = C.menu_price, last = g.last(), d = p - last;
+    int q = order_qty();
+    ImGui::TextDisabled("%.2f   %s%.2f pt from last", p, d >= 0 ? "+" : "-", std::fabs(d));
+    ImGui::Separator();
+    auto item = [](const std::string& s) { return ImGui::MenuItem(s.c_str()); };
+    if (d < 0) {
+        if (item(strf("Buy %d  limit  (buy the dip to %.2f)", q, p))) pending_order(1, OrderType::Limit, p);
+        if (item(strf("Sell %d  stop  (sell a break below %.2f)", q, p))) pending_order(-1, OrderType::Stop, p);
+    } else if (d > 0) {
+        if (item(strf("Sell %d  limit  (sell the rally to %.2f)", q, p))) pending_order(-1, OrderType::Limit, p);
+        if (item(strf("Buy %d  stop  (buy a break above %.2f)", q, p))) pending_order(1, OrderType::Stop, p);
+    } else {
+        ImGui::TextDisabled("at the last price: use Buy / Sell market");
+    }
+    if (b.pos) {
+        int dir = b.pos > 0 ? 1 : -1, n = std::abs(b.pos);
+        double per = (p - b.avg) * dir * b.mult;  // $ per contract if filled here
+        ImGui::Separator();
+        if (d * dir < 0) {
+            if (item(strf("Move stop here  (%s$%.0f)", per * n < 0 ? "-" : "+", std::fabs(per * n)))) set_stop(p);
+        } else if (d * dir > 0) {
+            if (item(strf("Target here: 1 contract  (+$%.0f)", per))) add_target(p, 1);
+            if (n > 1 && item(strf("Target here: half, %d  (+$%.0f)", n / 2, per * (n / 2)))) add_target(p, n / 2);
+            if (n > 1 && item(strf("Target here: all %d  (+$%.0f)", n, per * n))) add_target(p, n);
+        }
+    }
+    ImGui::EndPopup();
+}
 
 void chart_draw(float w, float h) {
     ImVec2 o = ImGui::GetCursorScreenPos();
@@ -775,6 +943,7 @@ void chart_draw(float w, float h) {
     bool hovered = ImGui::IsItemHovered(), pressed = ImGui::IsItemActivated();
     Layout L = layout(w, h);
     if (g.s.n() && M.n == g.s.n() && !L.panes.empty()) chart_input(L, o, hovered, pressed);
+    order_menu();
     Painter P{ImGui::GetWindowDrawList(), o.x, o.y};
     P.dl->PushClipRect(o, ImVec2(o.x + w, o.y + h), true);
     draw_chart(P, layout(w, h));  // after input: pans and zooms show in this frame

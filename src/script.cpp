@@ -274,6 +274,7 @@ bool load_script(lua_State* L, ScriptDef& d) {
     d.name = get_str(L, t, "name", d.id);
     d.description = get_str(L, t, "description");
     d.overlay = get_bool(L, t, "overlay", true);
+    d.trades = get_bool(L, t, "trades", false);
     d.zero_based = get_bool(L, t, "zero_based", false);
     d.timeframe = std::max(1, static_cast<int>(get_num(L, t, "timeframe", 1)));
     d.warmup_days = std::max(0, static_cast<int>(get_num(L, t, "warmup_days", 0)));
@@ -465,6 +466,37 @@ bool run_indicator(const ScriptDef& d, const Params& p, const Series& s, int tf,
             out.segments.push_back({i0, std::clamp(i1, i0, n - 1), lua_tonumber(L, -3), plot_index(-2),
                                     static_cast<float>(lua_isnumber(L, -1) ? lua_tonumber(L, -1) : 1.0)});
         lua_pop(L, 6);
+    }
+    lua_pop(L, 2);
+    lua_getfield(L, o, "_orders");
+    for (lua_Integer k = 1; lua_rawgeti(L, -1, k) == LUA_TTABLE; ++k) {
+        IndOrder r;
+        auto num = [&](int f, double def) {
+            lua_rawgeti(L, -1, f);
+            double v = lua_isnumber(L, -1) ? lua_tonumber(L, -1) : def;
+            lua_pop(L, 1);
+            return v;
+        };
+        r.side = num(1, 1) < 0 ? -1 : 1;
+        lua_rawgeti(L, -1, 2);
+        std::string kind = lua_isstring(L, -1) ? lua_tostring(L, -1) : "stop";
+        lua_pop(L, 1);
+        r.kind = kind == "limit" ? OrderType::Limit : kind == "market" ? OrderType::Market : OrderType::Stop;
+        r.price = num(3, 0), r.stop = num(4, -1), r.target = num(5, -1), r.target2 = num(6, -1);
+        r.qty = static_cast<int>(num(7, 0));
+        out.orders.push_back(r);
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 2);
+    lua_getfield(L, o, "_bars");
+    for (lua_Integer k = 1; lua_rawgeti(L, -1, k) == LUA_TTABLE; ++k) {
+        for (int f = 1; f <= 4; ++f) lua_rawgeti(L, -f, f);
+        // stack: ..., entry, i, plot, alpha, candle
+        long i = static_cast<long>(lua_tointeger(L, -4)) - 1;
+        if (i >= 0 && i < n)
+            out.bars.push_back({i, plot_index(-3), static_cast<float>(lua_isnumber(L, -2) ? lua_tonumber(L, -2) : 0.15),
+                                static_cast<bool>(lua_toboolean(L, -1))});
+        lua_pop(L, 5);
     }
     lua_settop(L, top);
     return true;

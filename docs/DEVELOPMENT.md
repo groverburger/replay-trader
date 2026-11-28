@@ -111,8 +111,9 @@ current cache produces.
 | Option | Effect |
 |---|---|
 | `--screenshot out.bmp` | Render off-screen on the CPU and exit: no window or GPU needed (`RT_UI_SCALE=2` for Retina size, `RT_SHOT_SIZE=850x500` for another size). It downloads first if there's a key |
+| `--demo` | Start with a few indicators and a bracketed trade. `RT_SHOT_INDS=macd,pivots` picks other indicators (script ids, user scripts included); `RT_SHOT_ADVANCE=300` replays that many minutes first (default 70) and `RT_SHOT_AFTER=5` that many after the demo's entry (default 25). `RT_SHOT_AUTOTRADE=1` ticks Auto-trade on indicators that trade and only replays |
 | `--show-setup` | With `--screenshot`, render the data screen instead |
-| `--show-strategy` | The opening range breakout trading the replay, with a 2025 backtest and the sidebar scrolled to the Strategy panel (`docs/strategy.png`) |
+| `--show-strategy` | The opening range breakout trading the replay, with a 2025 backtest and the sidebar scrolled to the Strategy panel (`docs/strategy.png`). `RT_SHOT_TRADE=7` jumps to the backtest's seventh trade; `RT_SHOT_ZOOM=10` then widens the view tenfold |
 | `--from YYYY-MM-DD` | Download only from that day (for testing the downloader) |
 | `--data file.bin` | Load a file in the `NQ1M0001` format instead of the cache (`tools/export_bars.py`, CI's `tools/make_test_data.py`) |
 | `--list-rolls` | Print the cached market's roll points and exit |

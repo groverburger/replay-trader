@@ -80,6 +80,7 @@ struct BacktestResult {
     int64_t from = 0, to = 0;      // New York minutes actually covered
     std::string strategy, params;
     bool qc_rolls = false;
+    std::string costs;             // the cost model it ran with (Broker::cost_summary)
 };
 
 class Backtest {

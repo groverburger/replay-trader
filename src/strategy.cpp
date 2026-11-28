@@ -292,6 +292,7 @@ void Backtest::start(const ScriptDef& def, const Params& p, const Market* m, int
     cancel();
     Broker b;
     b.mult = settings.mult, b.commission = settings.commission, b.slip_ticks = settings.slip_ticks;
+    b.fee_schedule = settings.fee_schedule;
     b.limit_touch = settings.limit_touch;
     {
         std::lock_guard<std::mutex> l(mu_);
@@ -319,6 +320,7 @@ void Backtest::run(ScriptDef def, Params p, const Market* m, int64_t from, int64
     BacktestResult r;
     r.strategy = def.name;
     r.qc_rolls = qc_rolls;
+    r.costs = b.cost_summary();
     Market qc;
     if (qc_rolls) {
         qc = qc_roll_schedule(*m);
@@ -442,9 +444,9 @@ BacktestStats compute_stats(const std::vector<RoundTrip>& trips, const Market& m
 bool export_trips_csv(const fs::path& path, const std::vector<RoundTrip>& trips) {
     std::FILE* f = open_file(path, "w");
     if (!f) return false;
-    std::fprintf(f, "entry_time,exit_time,side,qty,entry,exit,pnl_usd\n");
+    std::fprintf(f, "entry_time,exit_time,side,qty,entry,exit,pnl_usd,fee_usd\n");
     for (const RoundTrip& r : trips)
-        std::fprintf(f, "%s,%s,%s,%d,%.2f,%.2f,%.2f\n", clock(r.t_in).c_str(), clock(r.t_out).c_str(),
-                     r.side > 0 ? "long" : "short", r.qty, r.p_in, r.p_out, r.pnl);
+        std::fprintf(f, "%s,%s,%s,%d,%.2f,%.2f,%.2f,%.2f\n", clock(r.t_in).c_str(), clock(r.t_out).c_str(),
+                     r.side > 0 ? "long" : "short", r.qty, r.p_in, r.p_out, r.pnl, r.fee);
     return std::fclose(f) == 0;
 }

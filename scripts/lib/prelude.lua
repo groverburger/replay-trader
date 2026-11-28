@@ -184,10 +184,56 @@ end
 function ta.crossover(a_prev, a, b_prev, b) return a_prev and b_prev and a_prev <= b_prev and a > b end
 function ta.crossunder(a_prev, a, b_prev, b) return a_prev and b_prev and a_prev >= b_prev and a < b end
 
+-------------------------------------------------------------------------------- session tracker (intraday)
+-- For strategies on 1-minute bars: call t:update(bar) first thing in on_bar. Prices are continuous (bar price
+-- minus the roll adjustment). Fields:
+--   hhmm, tod        the bar's start time
+--   rth              the bar is in the regular session (09:30-16:00)
+--   first            this is the session's first RTH bar
+--   n                RTH bars so far today (including this one)
+--   open, hi, lo     today's RTH open and the high/low so far (including this bar)
+--   o, h, l, c       this bar, continuous
+--   vwap, volume     today's RTH VWAP (typical price) and volume so far
+--   prev_close       the previous session's last RTH close
+--   atr              mean RTH range of the previous 20 sessions (nil until 20 sessions are known)
+--   last_rth         true on the session's last RTH bar (15:59, or the last bar before an early close);
+--                    needs ctx: pass it as t:update(bar, ctx)
+local SESSION = class()
+function session_tracker() return setmetatable({ ranges = {} }, SESSION) end
+function SESSION:update(bar, ctx)
+  local adj = bar.adj or 0
+  local o, h, l, c = bar.open - adj, bar.high - adj, bar.low - adj, bar.close - adj
+  local day = floor(bar.time / 1440)
+  self.hhmm, self.tod = time.hhmm(bar.time), time.tod(bar.time)
+  self.rth = self.tod >= 570 and self.tod < 960
+  self.first = false
+  if self.rth and day ~= self.day then
+    if self.hi then
+      self.ranges[#self.ranges + 1] = self.hi - self.lo
+      if #self.ranges > 20 then table.remove(self.ranges, 1) end
+      self.prev_close = self.close
+    end
+    self.day, self.first = day, true
+    self.open, self.hi, self.lo, self.n, self.pv, self.volume = o, h, l, 0, 0, 0
+    local s = 0
+    for _, r in ipairs(self.ranges) do s = s + r end
+    self.atr = #self.ranges == 20 and s / 20 or nil
+  end
+  if self.rth then
+    self.hi, self.lo, self.n = max(self.hi, h), min(self.lo, l), self.n + 1
+    self.pv = self.pv + (h + l + c) / 3 * bar.volume
+    self.volume = self.volume + bar.volume
+    self.vwap = self.volume > 0 and self.pv / self.volume or c
+    self.close = c
+  end
+  self.o, self.h, self.l, self.c = o, h, l, c
+  self.last_rth = self.rth and (self.hhmm == 1559 or (ctx ~= nil and not ctx:market_open_next()))
+end
+
 -------------------------------------------------------------------------------- indicator output (used by the app)
 local OUT = class()
 function __new_output(names)
-  local out = setmetatable({ _markers = {}, _segments = {} }, OUT)
+  local out = setmetatable({ _markers = {}, _segments = {}, _bars = {}, _orders = {} }, OUT)
   for _, n in ipairs(names) do out[n] = {} end
   return out
 end
@@ -198,6 +244,23 @@ end
 -- A horizontal line from bar i0 to bar i1 at price.
 function OUT:segment(i0, i1, price, plot, alpha)
   self._segments[#self._segments + 1] = { i0, i1, price, plot, alpha or 1 }
+end
+-- Bar i's candle drawn in the plot's colour instead of green/red.
+function OUT:bar_color(i, plot)
+  self._bars[#self._bars + 1] = { i, plot, 1, true }
+end
+-- The entry order this indicator wants working now (indicators with `trades = true`). Call it once, for the
+-- latest bar; the replay keeps one order per indicator in step with the latest call, moving or cancelling it
+-- as the calls change, while the indicator's Auto-trade box is ticked and the position is flat.
+-- side 1 buy / -1 sell; kind "stop", "limit" or "market"; opts: stop, target, target2 (points), qty.
+function OUT:order(side, kind, price, opts)
+  opts = opts or {}
+  self._orders[#self._orders + 1] = { side, kind, price or 0, opts.stop or -1, opts.target or -1, opts.target2 or -1,
+                                      opts.qty or 0 }
+end
+-- A shaded column behind bar i, full pane height, in the plot's colour (alpha defaults to 0.15).
+function OUT:highlight(i, plot, alpha)
+  self._bars[#self._bars + 1] = { i, plot, alpha or 0.15, false }
 end
 
 -------------------------------------------------------------------------------- strategy context (used by the app)

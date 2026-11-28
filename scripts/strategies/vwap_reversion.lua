@@ -4,11 +4,16 @@
 -- the target is VWAP itself (a limit order moved to the current VWAP every bar), the stop is `stop_atr` ATRs
 -- beyond the entry, and a trade that hasn't worked after `max_bars` bars is closed. Trading stops for the day
 -- after a closed loss of `daily_loss` dollars. Entries 10:00-15:00 only; flat by 15:55.
+--
+-- mode = "follow" inverts it: the same signal enters with the move, the stop sits at VWAP (moved to the
+-- current VWAP every bar) and the target is `stop_atr` ATRs away. Costs are paid either way, so a strategy
+-- that loses steadily doesn't turn into a winner by being turned around unless it loses more than its costs.
 return strategy {
   name = "VWAP reversion",
-  description = "API example (no tested edge): fades VWAP-band extremes; target follows VWAP; daily loss limit.",
+  description = "API example (no tested edge): fades VWAP-band extremes (or follows them); VWAP leg moves; daily loss limit.",
   timeframe = 1,
   params = {
+    { "mode", "fade", options = { "fade", "follow" }, label = "Mode" },
     { "band", 2.0, min = 0.5, max = 4, step = 0.25, label = "Band (sd)" },
     { "rsi", 14, min = 2, max = 50, label = "RSI period" },
     { "rsi_extreme", 25, min = 5, max = 45, label = "RSI extreme (from 0/100)" },
@@ -39,8 +44,8 @@ return strategy {
 
     if pos ~= 0 then
       v.bars_in = (v.bars_in or 0) + 1
-      local target = ctx:target_order()
-      if target then ctx:modify(target.id, ctx:round_tick(vw)) end  -- chase VWAP
+      local leg = p.mode == "follow" and ctx:stop_order() or ctx:target_order()
+      if leg then ctx:modify(leg.id, ctx:round_tick(vw)) end  -- chase VWAP
       if v.bars_in >= p.max_bars then
         ctx:flatten()
         ctx:log("time stop")
@@ -57,13 +62,16 @@ return strategy {
 
     local sd = v.vwap.sd
     if sd <= 0 then return end
-    local stop = ctx:round_tick(p.stop_atr * atr)
-    if bar.close > vw + p.band * sd and r >= 100 - p.rsi_extreme then
-      ctx:sell(p.qty, { stop_loss = stop, take_profit = math.max(ctx.tick, bar.close - vw) })
-      v.bars_in = 0
-    elseif bar.close < vw - p.band * sd and r <= p.rsi_extreme then
-      ctx:buy(p.qty, { stop_loss = stop, take_profit = math.max(ctx.tick, vw - bar.close) })
-      v.bars_in = 0
-    end
+    local far = ctx:round_tick(p.stop_atr * atr)                -- distance to the ATR leg
+    local near = math.max(ctx.tick, math.abs(bar.close - vw))   -- distance to VWAP
+    local follow = p.mode == "follow"
+    local side
+    if bar.close > vw + p.band * sd and r >= 100 - p.rsi_extreme then side = -1
+    elseif bar.close < vw - p.band * sd and r <= p.rsi_extreme then side = 1 end
+    if not side then return end
+    if follow then side = -side end
+    local opts = follow and { stop_loss = near, take_profit = far } or { stop_loss = far, take_profit = near }
+    if side > 0 then ctx:buy(p.qty, opts) else ctx:sell(p.qty, opts) end
+    v.bars_in = 0
   end,
 }

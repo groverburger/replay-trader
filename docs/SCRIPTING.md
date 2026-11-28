@@ -79,6 +79,19 @@ shapes:
 - `out:marker(i, price, "up" | "down", plot)` draws a triangle below the price (pointing up) or above it
   (pointing down), in the plot's colour.
 - `out:segment(i0, i1, price, plot, alpha)` draws a horizontal line from bar `i0` to bar `i1`.
+- `out:bar_color(i, plot)` draws bar `i`'s candle in the plot's colour instead of green or red.
+- `out:highlight(i, plot, alpha)` shades a full-height column behind bar `i` in the plot's colour (alpha
+  defaults to 0.15).
+- `out:order(side, kind, price, opts)` asks for an entry order (`trades = true` indicators only; see below).
+
+**Indicators that trade.** With `trades = true` in the definition, the indicator gets an **Auto-trade** box in the
+Indicators panel. While it is ticked, the replay re-runs the indicator after every revealed minute, on the
+timeframe chosen next to the box (5m to start; a warning shows when the chart is on another one), and keeps one entry order working to match its latest
+`out:order` call: placed, moved to the new price, or cancelled when the call stops. Call it once, for the next
+trade (after the loop over the bars). `side` is 1 to buy or -1 to sell, `kind` is `"stop"`, `"limit"` or
+`"market"`, and `opts` may hold `stop`, `target` and `target2` (bracket distances in points; 0 = none; left out,
+the Order Ticket's bracket applies) and `qty` (left out: the ticket's quantity or its risk sizing). It only
+enters from flat; the bracket works like a manual entry's (one stop for the position, two scale-out targets).
 
 **Definition options:**
 
@@ -86,7 +99,7 @@ shapes:
   - `"line"` (default).
   - `"step"`: each bar's value drawn flat across its own width. Use it for levels.
   - `"histogram"`: bars from zero. Add `color_by = "bar"` to colour each bar by its candle.
-  - `"markers"`: draws nothing itself, and exists to give markers and segments a colour.
+  - `"markers"`: draws nothing itself, and exists to give markers, segments and bar marks a colour.
 - **Pane options:** `range = { 0, 100 }` fixes the pane's scale, `levels = { 30, 70 }` draws reference lines,
   and `zero_based = true` starts the scale at 0.
 - **`label = function(p) return "My SMA " .. p.period end`** sets the legend text. The default is the name
@@ -101,7 +114,9 @@ A strategy trades the paper account automatically. It runs in two modes:
 - **Auto-trade:** tick "Auto-trade the replay" in the Strategy panel, and it trades alongside you as the
   replay plays.
 - **Backtest:** press "Run backtest" to run it over a date range in the background. You get statistics, an
-  equity curve and a CSV of the trades.
+  equity curve and a CSV of the trades. The trades are drawn on the chart (entry triangle, a line to the exit,
+  green for a gain and red for a loss). Click a trade in the list, use Prev / Next, or press `[` / `]` to
+  jump to it: this starts a new replay session revealed to the end of that trading day, framed on the trade.
 
 Either way the strategy sees only closed bars on its own timeframe, and its orders fill from the next minute
 on. The fill rules are the ones manual orders use: no lookahead, with slippage and commission from the order
@@ -189,6 +204,13 @@ return strategy {
 **State and logging.** Keep state in `ctx.vars`, or in locals: a script's top-level locals persist for the
 run. `ctx:log(...)` writes to the log, with the replay time.
 
+### Intraday helper: `session_tracker()`
+
+For 1-minute strategies: create one in `init` (`ctx.vars.t = session_tracker()`) and call `t:update(bar, ctx)` at
+the top of `on_bar`. It keeps today's RTH open, high, low and VWAP, the previous session's close, ATR20 of daily
+RTH ranges, the bar count, and `last_rth` (the session's last RTH bar, including early closes), all in
+continuous prices. See the comments in the prelude for every field.
+
 ### Streaming indicators: `ta`
 
 Create these once, in `init`, then call `:update(...)` once per bar. Each returns the new value (also stored in
@@ -223,7 +245,13 @@ after taker costs:
 | IBS reversion | close in the bottom 20% of the day's range: buy, sell the next close | 0.58 |
 | Double seven | above the 200-session average, a 7-session closing low: buy; sell a 7-session closing high | 0.68 |
 
-They are long only and partly overlap. Three API examples show other features and have no tested edge:
+They are long only and partly overlap.
+
+Overnight drift is intraday: long from the 18:00 Globex open to 03:00, skipping nights when RTH volatility is
+below 0.8 times its one-year median. On NQ after costs its Sharpe was 0.68 (2010-18), 0.81 (2019-22) and 0.23
+(2023-26, held out); it is sensitive to slippage at the evening open.
+
+Three API examples show other features and have no tested edge:
 opening range breakout (stop entries, brackets, breakeven stop), EMA trend (5-minute bars, trailing stop via
 `modify`) and VWAP reversion (moving target, time stop, daily loss limit).
 

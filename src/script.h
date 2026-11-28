@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "broker.h"
 #include "market.h"
 #include "rgba.h"
 
@@ -47,6 +48,7 @@ struct ScriptDef {
     std::vector<ParamDef> params;
     // indicators
     bool overlay = true, zero_based = false, has_range = false;
+    bool trades = false;  // an indicator that can place entry orders (out:order)
     double range_lo = 0, range_hi = 1;
     std::vector<double> levels;
     std::vector<PlotDef> plots;
@@ -87,10 +89,24 @@ struct IndSegment {
     int plot;
     float alpha;
 };
+struct IndBarMark {  // out:bar_color (candle = true) or out:highlight (a shaded column)
+    long i;
+    int plot;
+    float alpha;
+    bool candle;
+};
+struct IndOrder {  // out:order: the entry an indicator wants working (bracket distances -1: the ticket's)
+    int side = 1;
+    OrderType kind = OrderType::Stop;
+    double price = 0, stop = -1, target = -1, target2 = -1;
+    int qty = 0;
+};
 struct IndOutput {
     std::vector<std::vector<double>> plots;  // per PlotDef, one value per series bar (NaN where none)
     std::vector<IndMarker> markers;
     std::vector<IndSegment> segments;
+    std::vector<IndBarMark> bars;
+    std::vector<IndOrder> orders;
     std::string error;
 };
 // Runs an indicator's calc over the series. `series_key` identifies the series contents (the bars table is

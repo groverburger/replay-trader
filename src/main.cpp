@@ -166,12 +166,25 @@ void start_replay() {
         if (((g.m.t[i] % 1440) + 1440) % 1440 == 570) g.opens.push_back(i);
     if (!g_start || !start_at(g_start)) random_day();
     if (g_demo) {  // a quick tour: a few indicators and a bracketed trade
-        for (const char* id : {"ema", "bollinger", "pivots", "vwap", "rsi", "macd"}) g.inds.push_back(make_ind(id, g.next_uid++));
+        std::string ids = "ema,bollinger,pivots,vwap,rsi,macd";
+        if (const char* e = std::getenv("RT_SHOT_INDS")) ids = e;  // e.g. macd,pivots,my_indicator
+        for (size_t a = 0; a < ids.size();) {
+            size_t b = ids.find(',', a);
+            if (b == std::string::npos) b = ids.size();
+            if (b > a) g.inds.push_back(make_ind(ids.substr(a, b - a).c_str(), g.next_uid++));
+            a = b + 1;
+        }
         g.tf_idx = 1;
-        advance(70);
+        if (std::getenv("RT_SHOT_AUTOTRADE")) {  // tick Auto-trade on the indicators that trade, then just replay
+            for (Ind& d : g.inds)
+                if (d.def() && d.def()->trades) set_ind_trade(d, true);
+            advance(std::getenv("RT_SHOT_ADVANCE") ? std::atoi(std::getenv("RT_SHOT_ADVANCE")) : 390);
+            return;
+        }
+        advance(std::getenv("RT_SHOT_ADVANCE") ? std::atoi(std::getenv("RT_SHOT_ADVANCE")) : 70);
         g.bracket = true;
         market_order(1, 1);
-        advance(25);
+        advance(std::getenv("RT_SHOT_AFTER") ? std::atoi(std::getenv("RT_SHOT_AFTER")) : 25);
         pending_order(-1, OrderType::Limit, round_tick(g.last() + 15));
     }
 }
@@ -190,8 +203,16 @@ bool load_market() {
 }
 
 // --backtest: run a strategy over a date range and print the statistics (no window, no download).
+struct CostArgs {
+    std::string mnq;              // --instrument nq|mnq ("" = NQ defaults)
+    double commission = -1;       // --commission $/side
+    int slippage = -1;            // --slippage ticks
+    std::string fees;             // --fees YEAR=$,YEAR=$,...
+    bool by_year = false;         // --by-year
+};
+
 int run_backtest_cli(const char* id, const char* from_s, const char* to_s, const std::vector<std::string>& sets,
-                     const char* data_file, const char* csv) {
+                     const char* data_file, const char* csv, const CostArgs& cost) {
     std::string err;
     if (data_file ? !g.m.load(data_file, err) : !load_market()) {
         std::fprintf(stderr, "%s\n", data_file ? err.c_str() : g_load_err.c_str());
@@ -219,6 +240,16 @@ int run_backtest_cli(const char* id, const char* from_s, const char* to_s, const
             } else p[k] = std::atof(val.c_str());
         }
         if (!found) std::fprintf(stderr, "warning: %s has no param %s\n", id, name.c_str());
+    }
+    if (!cost.mnq.empty()) {
+        bool micro = cost.mnq == "mnq";
+        g.broker.mult = micro ? 2.0 : 20.0, g.broker.commission = micro ? 0.62 : 2.15;
+    }
+    if (cost.commission >= 0) g.broker.commission = cost.commission;
+    if (cost.slippage >= 0) g.broker.slip_ticks = cost.slippage;
+    if (!cost.fees.empty()) {  // "2010=2.01,2016=2.03,..." or nq / mnq for the built-in history
+        std::string fees = cost.fees == "nq" ? kNqFeeHistory : cost.fees == "mnq" ? kMnqFeeHistory : cost.fees;
+        if (!parse_fee_schedule(fees, g.broker.fee_schedule, err)) return std::fprintf(stderr, "%s\n", err.c_str()), 1;
     }
     int64_t from = g.m.t.front(), to = g.m.t.back() + 1;
     if (from_s && !parse_minutes(from_s, from)) return std::fprintf(stderr, "bad --bt-from\n"), 1;
@@ -248,6 +279,18 @@ int run_backtest_cli(const char* id, const char* from_s, const char* to_s, const
     if (r.log.size() > 8) std::printf("  log: ... %zu lines\n", r.log.size());
     for (const std::string& l : r.log)
         if (l.find("gap in the data") != std::string::npos) std::printf("  warning: %s\n", l.c_str());
+    std::printf("costs: %s\n", r.costs.c_str());
+    if (cost.by_year && !r.trips.empty()) {  // by the year each trade closed
+        std::printf("year  trades    net $   fees $  fee/trade   win%%\n");
+        auto year_of = [](int64_t t) { int y, mo, d; civil_from_days(floor_div(t, 1440), y, mo, d); return y; };
+        for (size_t k = 0; k < r.trips.size();) {
+            int y = year_of(r.trips[k].t_out), n = 0, w = 0;
+            double net = 0, fee = 0;
+            for (; k < r.trips.size() && year_of(r.trips[k].t_out) == y; ++k)
+                ++n, net += r.trips[k].pnl, fee += r.trips[k].fee, w += r.trips[k].pnl > 0;
+            std::printf("%d  %6d  %7.0f  %7.0f  %9.2f  %5.1f\n", y, n, net, fee, fee / n, 100.0 * w / n);
+        }
+    }
     if (csv) std::printf(export_trips_csv(csv, r.trips) ? "trades written to %s\n" : "could not write %s\n", csv);
     return r.error.empty() ? 0 : 1;
 }
@@ -303,7 +346,9 @@ void handle_keys() {
     };
     static const K keys[] = {{ImGuiKey_Space, "space", false}, {ImGuiKey_RightArrow, "Right", true}, {ImGuiKey_UpArrow, "Up", true},
                              {ImGuiKey_DownArrow, "Down", true}, {ImGuiKey_B, "b", false}, {ImGuiKey_S, "s", false},
-                             {ImGuiKey_X, "x", false}, {ImGuiKey_C, "c", false}, {ImGuiKey_L, "l", false}, {ImGuiKey_N, "n", false}};
+                             {ImGuiKey_X, "x", false}, {ImGuiKey_C, "c", false}, {ImGuiKey_L, "l", false}, {ImGuiKey_N, "n", false},
+                             {ImGuiKey_A, "a", false}, {ImGuiKey_H, "h", false}, {ImGuiKey_E, "e", false},
+                             {ImGuiKey_LeftBracket, "bracketleft", true}, {ImGuiKey_RightBracket, "bracketright", true}};
     for (const K& k : keys)
         if (ImGui::IsKeyPressed(k.key, k.repeat)) hotkey(k.sym, mods);
 }
@@ -317,6 +362,7 @@ void frame(float dt) {
         if (g.bt.runs() != g.bt_seen && !g.bt.running()) {  // a backtest finished
             g.bt_result = g.bt.result();
             g.bt_seen = g.bt.runs();
+            g.bt_sel = -1;
         }
     } else if (g_dl.finished() && g_dl.runs != g_handled_run) {  // a clean download goes straight on to the trader
         g_handled_run = g_dl.runs;
@@ -388,6 +434,8 @@ void show_strategy() {
     while (g.bt.running()) std::this_thread::sleep_for(std::chrono::milliseconds(20));
     g.bt_result = g.bt.result();
     g.bt_seen = g.bt.runs();
+    if (const char* k = std::getenv("RT_SHOT_TRADE")) goto_trade(std::atoi(k) - 1);  // e.g. 5: the fifth trade
+    if (const char* z = std::getenv("RT_SHOT_ZOOM")) chart_zoom_out(std::atof(z));
     panels_scroll_to_end();
 }
 
@@ -775,6 +823,7 @@ int main(int argc, char** argv) {
     bool offline = false, show_setup = false;
     const char *bt_id = nullptr, *bt_from = nullptr, *bt_to = nullptr, *bt_csv = nullptr;
     std::vector<std::string> bt_sets;  // --set name=value (backtest params)
+    CostArgs cost;
     for (int a = 1; a < argc; ++a) {
         if (!std::strcmp(argv[a], "--screenshot") && a + 1 < argc) shot = argv[++a];
         else if (!std::strcmp(argv[a], "--start") && a + 1 < argc) g_start = argv[++a];
@@ -787,6 +836,11 @@ int main(int argc, char** argv) {
         else if (!std::strcmp(argv[a], "--set") && a + 1 < argc) bt_sets.push_back(argv[++a]);
         else if (!std::strcmp(argv[a], "--bt-csv") && a + 1 < argc) bt_csv = argv[++a];
         else if (!std::strcmp(argv[a], "--qc-rolls")) g.bt_qc_rolls = true;
+        else if (!std::strcmp(argv[a], "--instrument") && a + 1 < argc) cost.mnq = argv[++a];
+        else if (!std::strcmp(argv[a], "--commission") && a + 1 < argc) cost.commission = std::atof(argv[++a]);
+        else if (!std::strcmp(argv[a], "--slippage") && a + 1 < argc) cost.slippage = std::atoi(argv[++a]);
+        else if (!std::strcmp(argv[a], "--fees") && a + 1 < argc) cost.fees = argv[++a];
+        else if (!std::strcmp(argv[a], "--by-year")) cost.by_year = true;
         else if (!std::strcmp(argv[a], "--list-rolls")) {  // the cached market's roll points, then exit
             std::string err;
             std::vector<std::string> notes;
@@ -809,6 +863,8 @@ int main(int argc, char** argv) {
                         "                     [--screenshot out.bmp] [--demo]\n"
                         "       replay_trader --backtest STRATEGY [--bt-from YYYY-MM-DD] [--bt-to YYYY-MM-DD]\n"
                         "                     [--set name=value ...] [--bt-csv trades.csv] [--qc-rolls] [--data file | --offline]\n"
+                        "                     [--instrument nq|mnq] [--commission $/side] [--slippage ticks]\n"
+                        "                     [--fees nq|mnq|YEAR=$/side,YEAR=$/side,...] [--by-year]\n"
                         "API key: --api-key, NQ_API_KEY, or the one saved from the data screen.\n"
                         "Data folder: %s\n", data_dir().string().c_str());
             return 0;
@@ -823,7 +879,7 @@ int main(int argc, char** argv) {
     bool headless = shot != nullptr;
 
     std::string err;
-    if (bt_id) return run_backtest_cli(bt_id, bt_from, bt_to, bt_sets, data_file, bt_csv);
+    if (bt_id) return run_backtest_cli(bt_id, bt_from, bt_to, bt_sets, data_file, bt_csv, cost);
     if (data_file) {  // a file from export_bars.py: no download
         if (!g.m.load(data_file, err)) {
             std::fprintf(stderr, "%s\n", err.c_str());
